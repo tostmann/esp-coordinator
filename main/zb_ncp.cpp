@@ -45,6 +45,8 @@ esp_err_t zb_ncp::init_int() {
     zb_tc_set_use_installcode(0);
     //zgp_disable();
 
+    zboss_start_no_autostart();
+
     zb_add_simple_descriptor(&ep1);
 
     m_channels_mask = zb_get_channel_mask();
@@ -62,8 +64,7 @@ static bool s_init_flag = false;
 
 void zb_ncp::ncp_zb_task(void* arg) {
 	zb_set_network_coordinator_role(0xffffff);
-    
-    zboss_start_no_autostart();
+
 
     zboss_main_loop();
     vTaskDelete(NULL);
