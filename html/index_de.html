@@ -33,6 +33,32 @@
             padding: 2rem; 
             border-radius: 8px; 
             box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); 
+            position: relative;
+        }
+        .lang-switch {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 5px;
+        }
+        .lang-switch a {
+            text-decoration: none;
+            padding: 4px 8px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            background: var(--bg);
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .lang-switch a.active {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+        .lang-switch a:hover:not(.active) {
+            background: #e2e8f0;
         }
         .header {
             display: flex;
