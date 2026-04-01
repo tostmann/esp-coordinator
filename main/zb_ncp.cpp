@@ -38,8 +38,9 @@ static const zb_af_simple_desc_7_20_t ep1 = {
 
 
 esp_err_t zb_ncp::init_int() {
+	esp_zb_overall_network_size_set(200); // Set network size first to scale up tables
 	ZB_INIT();
-	zb_set_max_children(64);
+	zb_set_max_children(200);
     zb_set_nvram_erase_at_start(0);
     zb_set_installcode_policy(0);
     zb_tc_set_use_installcode(0);
