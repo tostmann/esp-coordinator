@@ -1737,14 +1737,14 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 		// but since we read/write memory directly in GET_NETWORK_BACKUP, it should be symmetric.
 		esp_zb_ieee_addr_t ext_pan;
 		memcpy(ext_pan, arg.extPanId, 8);
-		esp_zb_set_extended_pan_id(ext_pan);
+		zb_set_extended_pan_id(ext_pan);
 		
 		esp_zb_set_primary_network_channel_set(1 << arg.channel);
 		
 		// Warning: Setting NWK key dynamically in ZBOSS 1.6 requires an API
 		// Usually we can use zb_secur_setup_nwk_key
 		extern void zb_secur_setup_nwk_key(uint8_t *key, uint8_t i);
-		zb_secur_setup_nwk_key(arg.nwkKey, 0);
+		zb_secur_setup_nwk_key((uint8_t*)arg.nwkKey, 0);
 
 		// ZBOSS automatically writes this to NVS on init
 		*res = 0; // Success
