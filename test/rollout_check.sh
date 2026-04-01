@@ -20,6 +20,9 @@ echo "============================================================"
 echo "🚀 STARTE END-TO-END ROLLOUT TEST: HASS -> Z2M -> NCP -> END DEVICE"
 echo "============================================================"
 
+# ESP-IDF Environment laden, um esptool.py und idf.py verfügbar zu machen
+source ./idf_env.sh
+
 # 1. Flashen des ESP32-C6 Coordinators
 echo "[1/4] Flashe esp-coordinator v1.1.0 (NCP) auf $COORD_PORT..."
 esptool.py -p $COORD_PORT -b 460800 --before default_reset --after hard_reset write_flash 0x0 $COORD_BIN
@@ -28,7 +31,6 @@ sleep 2
 
 # 2. Bauen & Flashen des Test-Zigbee-Geräts (TUL32-C6)
 echo "[2/4] Baue & flashe Test-Endgerät (HA On/Off Light) auf $DEVICE_PORT..."
-source ./idf_env.sh
 cd $DEVICE_DIR
 # Target setzen, falls noch nicht geschehen
 idf.py set-target esp32c6
