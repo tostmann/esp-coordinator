@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -25,7 +25,6 @@
             display: flex; 
             flex-direction: column; 
             align-items: center; 
-            position: relative;
         }
         .container { 
             width: 100%; 
@@ -34,32 +33,6 @@
             padding: 2rem; 
             border-radius: 8px; 
             box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); 
-            position: relative;
-        }
-        .lang-switch {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            display: flex;
-            gap: 5px;
-        }
-        .lang-switch a {
-            text-decoration: none;
-            padding: 4px 8px;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            color: var(--text);
-            background: var(--bg);
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .lang-switch a.active {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
-        }
-        .lang-switch a:hover:not(.active) {
-            background: #e2e8f0;
         }
         .header {
             display: flex;
@@ -108,8 +81,8 @@
 
 <div class="container">
     <div class="lang-switch">
-        <a href="index.html" class="active">EN</a>
-        <a href="index_de.html">DE</a>
+        <a href="index.html">EN</a>
+        <a href="index_de.html" class="active">DE</a>
     </div>
 
     <div class="header">
@@ -119,51 +92,51 @@
             <div style="font-size: 14px; color: #64748b;">
                 <strong>Version:</strong> v1.1.0<br>
                 <strong>Hardware:</strong> ESP32-C6<br>
-                <strong>Purpose:</strong> Zigbee Coordinator firmware for Z2M
+                <strong>Zweck:</strong> Zigbee Coordinator Firmware für Z2M
             </div>
         </div>
     </div>
 
     <div class="info-box">
         <strong>Information:</strong>
-        This tool flashes the firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> directly via your browser to your ESP32-C6. 
-        The process automatically verifies if the connected device is actually an <b>ESP32-C6</b>.
+        Dieses Tool flasht die Firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> direkt über den Browser auf deinen ESP32-C6. 
+        Der Prozess überprüft automatisch, ob es sich bei dem angeschlossenen Gerät tatsächlich um einen <b>ESP32-C6</b> handelt.
     </div>
 
     <div class="flasher-box">
-        <h3 style="margin-top:0;">1. Connect your device via USB</h3>
-        <p style="font-size: 14px; color: #475569;">Click the button below, select your serial port (e.g., USB JTAG/serial debug unit) and start the flash process.</p>
+        <h3 style="margin-top:0;">1. Verbinde dein Gerät via USB</h3>
+        <p style="font-size: 14px; color: #475569;">Klicke auf den Button unten, wähle deinen seriellen Port (z.B. USB JTAG/serial debug unit) und starte den Flash-Vorgang.</p>
         
         <!-- The manifest.json enforces chipFamily = "ESP32-C6" -->
         <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
         <div style="margin-top: 10px; font-size: 12px; color: #94a3b8;">
-            Supported browsers: Chrome, Edge, Opera. (Safari/Firefox do not fully support WebSerial yet).
+            Unterstützte Browser: Chrome, Edge, Opera. (Safari/Firefox unterstützen WebSerial noch nicht vollständig).
         </div>
     </div>
 
-    <h2>2. Zigbee2MQTT (Z2M) Setup</h2>
+    <h2>2. Zigbee2MQTT (Z2M) Einrichtung</h2>
     <p style="font-size: 14px; line-height: 1.6;">
-        Once flashing is complete, the coordinator can be integrated into Zigbee2MQTT.
-        Adjust your <code>configuration.yaml</code> (located at `zigbee2mqtt/data/`) as follows:
+        Sobald das Flashen abgeschlossen ist, kann der Coordinator in Zigbee2MQTT eingebunden werden.
+        Passe dazu deine <code>configuration.yaml</code> (unter `zigbee2mqtt/data/`) wie folgt an:
     </p>
     
     <pre style="background: #1e293b; color: #f8fafc; padding: 15px; border-radius: 6px; font-size: 13px; overflow-x: auto;">
 serial:
-  # Replace this path with your actual USB path
+  # Ersetze diesen Pfad durch deinen tatsächlichen USB-Pfad
   port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_...
-  # Mandatory for the ESP32 ZBOSS firmware:
+  # Zwingend erforderlich für die ESP32 ZBOSS Firmware:
   adapter: zboss
 
 advanced:
-  # Transmit Power - Optional
+  # Sendeleistung (TX Power) - Optional
   transmit_power: 20
 </pre>
 
     <div style="font-size: 13px; color: #64748b; line-height: 1.5; margin-top: 20px;">
-        <b>Important Notes:</b><br>
-        • The firmware is optimized for maximum stability using the <b>ZBOSS</b> protocol.<br>
-        • If Z2M reports "Port is busy" during startup, ensure no other services (like ModemManager) are blocking the port.<br>
-        • ZHA/Zigpy is officially not supported; please use Zigbee2MQTT exclusively.
+        <b>Wichtige Hinweise:</b><br>
+        • Die Firmware ist auf maximale Stabilität für das <b>ZBOSS</b> Protokoll optimiert.<br>
+        • Wenn Z2M beim Starten "Port is busy" meldet, stellen Sie sicher, dass keine anderen Dienste (wie z.B. ModemManager) den Port blockieren.<br>
+        • ZHA/Zigpy wird offiziell nicht unterstützt; bitte ausschließlich Zigbee2MQTT verwenden.
     </div>
 </div>
 
