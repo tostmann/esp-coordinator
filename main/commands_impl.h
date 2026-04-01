@@ -1705,7 +1705,7 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
 
 
 extern "C" void esp_zb_set_pan_id(uint16_t pan_id);
-extern "C" void esp_zb_set_extended_pan_id(esp_zb_ieee_addr_t ext_pan_id);
+extern "C" void esp_zb_set_extended_pan_id(zb_ieee_addr_t ext_pan_id);
 extern "C" void esp_zb_set_primary_network_channel_set(uint32_t channel_mask);
 
 // [CommandId.RESTORE_NETWORK]: {
