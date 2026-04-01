@@ -37,10 +37,10 @@ static const zb_af_simple_desc_7_20_t ep1 = {
 };
 
 
-#include "esp_zigbee_core.h"
+extern "C" void zb_config_overall_network_size(uint16_t size);
 
 esp_err_t zb_ncp::init_int() {
-	esp_zb_overall_network_size_set(200); // Set network size first to scale up tables
+	zb_config_overall_network_size(200); // Set network size first to scale up tables
 	ZB_INIT();
 	zb_set_max_children(200);
     zb_set_nvram_erase_at_start(0);
