@@ -1703,3 +1703,51 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
     }
 };
 
+
+extern "C" void esp_zb_set_pan_id(uint16_t pan_id);
+extern "C" void esp_zb_set_extended_pan_id(esp_zb_ieee_addr_t ext_pan_id);
+extern "C" void esp_zb_set_primary_network_channel_set(uint32_t channel_mask);
+
+// [CommandId.RESTORE_NETWORK]: {
+//     request: [
+//         {name: 'panId', type: DataType.UINT16},
+//         {name: 'extPanId', type: DataType.EXTENDED_PAN_ID},
+//         {name: 'channel', type: DataType.UINT8},
+//         {name: 'nwkKey', type: DataType.SEC_KEY},
+//     ],
+//     response: [...commonResponse],
+// }
+struct RESTORE_NETWORK_req_t {
+	uint16_t panId;
+	uint8_t extPanId[8];
+	uint8_t channel;
+	uint8_t nwkKey[16];
+} __attribute__((packed));
+
+template <>
+struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK>,
+		general_status_arg_res<RESTORE_NETWORK,RESTORE_NETWORK_req_t,uint8_t> {
+	static void process_status_res(ncp_generic_status_t& status, RESTORE_NETWORK_req_t* arg, uint8_t* res) {
+		// Restore network parameters logic
+		// This will set the pan ID, ext pan ID, channel and NWK key
+		
+		esp_zb_set_pan_id(arg->panId);
+		
+		// Note: The extPanId needs to be reversed back if the JS sends it in Big-Endian, 
+		// but since we read/write memory directly in GET_NETWORK_BACKUP, it should be symmetric.
+		esp_zb_ieee_addr_t ext_pan;
+		memcpy(ext_pan, arg->extPanId, 8);
+		esp_zb_set_extended_pan_id(ext_pan);
+		
+		esp_zb_set_primary_network_channel_set(1 << arg->channel);
+		
+		// Warning: Setting NWK key dynamically in ZBOSS 1.6 requires an API
+		// Usually we can use zb_secur_setup_nwk_key
+		extern void zb_secur_setup_nwk_key(uint8_t *key, uint8_t i);
+		zb_secur_setup_nwk_key(arg->nwkKey, 0);
+
+		// ZBOSS automatically writes this to NVS on init
+		*res = 0; // Success
+    }
+};
+
