@@ -31,6 +31,7 @@ COMMAND(GET_COORDINATOR_VERSION,                0x0024)
     // NCP_RESET_IND = 0x002b,
     // NVRAM_WRITE = 0x002e,
     // NVRAM_READ = 0x002f,
+COMMAND(GET_NETWORK_BACKUP,                     0x0099)
     // NVRAM_ERASE = 0x0030,
     // NVRAM_CLEAR = 0x0031,
 COMMAND(SET_TC_POLICY,                          0x0032)
