@@ -37,6 +37,8 @@ static const zb_af_simple_desc_7_20_t ep1 = {
 };
 
 
+#include "esp_zigbee_core.h"
+
 esp_err_t zb_ncp::init_int() {
 	esp_zb_overall_network_size_set(200); // Set network size first to scale up tables
 	ZB_INIT();
