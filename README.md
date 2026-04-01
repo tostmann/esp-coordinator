@@ -31,9 +31,17 @@ advanced:
   transmit_power: 20
 ```
 
-## Flashing Instructions
+## Flashing Instructions (Web Installer & CLI)
 
-You can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, and the app.
+### 1. Web Installer (Recommended)
+You can flash the `v1.1.0` firmware directly from your browser using our Web Serial Flasher tool. 
+
+👉 **[Launch ESP-Coordinator Web Flasher](https://install.busware.de/zboss/)** 
+
+(Supported Browsers: Chrome, Edge, Opera)
+
+### 2. Manual CLI Flashing
+Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, and the app.
 
 ```bash
 esptool.py -p /dev/ttyACM0 --chip esp32c6 write_flash 0x0 binaries/esp-coordinator-v1.1.0-esp32c6-factory.bin
