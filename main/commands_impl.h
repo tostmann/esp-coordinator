@@ -1727,7 +1727,7 @@ struct RESTORE_NETWORK_req_t {
 template <>
 struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK>,
 		general_status_arg_res<RESTORE_NETWORK,RESTORE_NETWORK_req_t,uint8_t> {
-	static void process_status_arg_res(ncp_generic_status_t& status, RESTORE_NETWORK_req_t& arg, uint8_t* res) {
+	static void process_status_arg_res(ncp_generic_status_t& status, const RESTORE_NETWORK_req_t& arg, uint8_t* res) {
 		// Restore network parameters logic
 		// This will set the pan ID, ext pan ID, channel and NWK key
 		
