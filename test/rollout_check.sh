@@ -23,6 +23,11 @@ echo "============================================================"
 # ESP-IDF Environment laden, um esptool.py und idf.py verfügbar zu machen
 source ./idf_env.sh
 
+# 0. Stop Zigbee2MQTT
+echo "[0/4] Stoppe Zigbee2MQTT..."
+sudo systemctl stop zigbee2mqtt
+sleep 2
+
 # 1. Flashen des ESP32-C6 Coordinators
 echo "[1/4] Flashe esp-coordinator v1.1.0 (NCP) auf $COORD_PORT..."
 esptool.py -p $COORD_PORT -b 460800 --before default_reset --after hard_reset write_flash 0x0 $COORD_BIN
