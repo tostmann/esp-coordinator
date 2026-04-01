@@ -1729,7 +1729,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 		// Restore network parameters logic
 		// This will set the pan ID, ext pan ID, channel and NWK key
 		
-		esp_zb_set_pan_id(arg.panId);
+		zb_set_pan_id(arg.panId);
 		
 		// Note: The extPanId needs to be reversed back if the JS sends it in Big-Endian, 
 		// but since we read/write memory directly in GET_NETWORK_BACKUP, it should be symmetric.
@@ -1737,7 +1737,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 		memcpy(ext_pan, arg.extPanId, 8);
 		zb_set_extended_pan_id(ext_pan);
 		
-		esp_zb_set_primary_network_channel_set(1 << arg.channel);
+		zb_set_nwk_channel_list(1 << arg.channel);
 		
 		// Warning: Setting NWK key dynamically in ZBOSS 1.6 requires an API
 		// Usually we can use zb_secur_setup_nwk_key
