@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP-Coordinator Flasher (ZBOSS NCP)</title>
+    <link rel="icon" type="image/png" href="busware.png">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --border: #e2e8f0;
+            --danger: #ef4444;
+            --success: #22c55e;
+        }
+        body { 
+            font-family: system-ui, -apple-system, sans-serif; 
+            background-color: var(--bg); 
+            color: var(--text); 
+            margin: 0; 
+            padding: 20px; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+        }
+        .container { 
+            width: 100%; 
+            max-width: 800px; 
+            background: var(--card-bg); 
+            padding: 2rem; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); 
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .header img {
+            max-width: 150px;
+        }
+        .header-text {
+            flex-grow: 1;
+        }
+        h1 { margin: 0 0 10px 0; font-size: 24px;}
+        h2 { font-size: 18px; color: #475569; margin-top: 20px;}
+        .flasher-box {
+            background: #f1f5f9;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 20px 0;
+            border: 1px dashed #cbd5e1;
+        }
+        .info-box {
+            background: #e0f2fe;
+            border-left: 4px solid var(--primary);
+            padding: 15px;
+            border-radius: 0 4px 4px 0;
+            margin-bottom: 20px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        ul { margin-top: 5px; padding-left: 20px; }
+        li { margin-bottom: 5px; }
+        
+        esp-web-install-button {
+            margin-top: 10px;
+        }
+    </style>
+    <!-- ESP Web Tools -->
+    <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <img src="busware.png" alt="Busware Logo">
+        <div class="header-text">
+            <h1>ESP-Coordinator (ZBOSS NCP)</h1>
+            <div style="font-size: 14px; color: #64748b;">
+                <strong>Version:</strong> v1.1.0<br>
+                <strong>Hardware:</strong> ESP32-C6<br>
+                <strong>Zweck:</strong> Zigbee Coordinator Firmware für Z2M
+            </div>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <strong>Information:</strong>
+        Dieses Tool flasht die Firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> direkt über den Browser auf deinen ESP32-C6. 
+        Der Prozess überprüft automatisch, ob es sich bei dem angeschlossenen Gerät tatsächlich um einen <b>ESP32-C6</b> handelt.
+    </div>
+
+    <div class="flasher-box">
+        <h3 style="margin-top:0;">1. Verbinde dein Gerät via USB</h3>
+        <p style="font-size: 14px; color: #475569;">Klicke auf den Button unten, wähle deinen seriellen Port (z.B. USB JTAG/serial debug unit) und starte den Flash-Vorgang.</p>
+        
+        <!-- The manifest.json enforces chipFamily = "ESP32-C6" -->
+        <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+        <div style="margin-top: 10px; font-size: 12px; color: #94a3b8;">
+            Unterstützte Browser: Chrome, Edge, Opera. (Safari/Firefox unterstützen WebSerial noch nicht vollständig).
+        </div>
+    </div>
+
+    <h2>2. Zigbee2MQTT (Z2M) Einrichtung</h2>
+    <p style="font-size: 14px; line-height: 1.6;">
+        Sobald das Flashen abgeschlossen ist, kann der Coordinator in Zigbee2MQTT eingebunden werden.
+        Passe dazu deine <code>configuration.yaml</code> (unter `zigbee2mqtt/data/`) wie folgt an:
+    </p>
+    
+    <pre style="background: #1e293b; color: #f8fafc; padding: 15px; border-radius: 6px; font-size: 13px; overflow-x: auto;">
+serial:
+  # Ersetze diesen Pfad durch deinen tatsächlichen USB-Pfad
+  port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_...
+  # Zwingend erforderlich für die ESP32 ZBOSS Firmware:
+  adapter: zboss
+
+advanced:
+  # Sendeleistung (TX Power) - Optional
+  transmit_power: 20
+</pre>
+
+    <div style="font-size: 13px; color: #64748b; line-height: 1.5; margin-top: 20px;">
+        <b>Wichtige Hinweise:</b><br>
+        • Die Firmware ist auf maximale Stabilität für das <b>ZBOSS</b> Protokoll optimiert.<br>
+        • Wenn Z2M beim Starten "Port is busy" meldet, stellen Sie sicher, dass keine anderen Dienste (wie z.B. ModemManager) den Port blockieren.<br>
+        • ZHA/Zigpy wird offiziell nicht unterstützt; bitte ausschließlich Zigbee2MQTT verwenden.
+    </div>
+</div>
+
+</body>
+</html>
