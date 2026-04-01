@@ -7,7 +7,9 @@ This implementation is focused on providing a stable Zigbee Coordinator role for
 
 ## Recent Fixes & Improvements (v1.1.0)
 
-This fork/version incorporates critical bugfixes for a stable Zigbee2MQTT experience:
+This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. It is specifically tailored for a highly stable **Zigbee2MQTT** experience and serves as a standalone, production-ready firmware alternative to TI or SiLabs-based adapters for ESP32-C6/H2 modules.
+
+### Key Features & Improvements (v1.1.0)
 * **NVRAM Persistence Fix:** Coordinator accurately resumes its network from NVRAM on boot instead of being flagged as reset, maintaining pairings across restarts.
 * **Synchronous NCP Reset Fix:** Reset acknowledgments (ACKs) are accurately sent back to the host *before* reboot, preventing Zigbee2MQTT handshake timeouts.
 * **Manufacturer Code Workaround:** `ZDO_SET_NODE_DESC_MANUF_CODE` implementation allows Z2M to emulate the manufacturer code dynamically.
