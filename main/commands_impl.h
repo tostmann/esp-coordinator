@@ -1,3 +1,5 @@
+#include "app.h"
+
 #include "commands_helpers.h"
 #include <esp_mac.h>
 
@@ -34,9 +36,9 @@ template <>
 struct zb_ncp::cmd_handle<GET_MODULE_VERSION> : immediate_cmd_process<GET_MODULE_VERSION>,
 		general_status_res<GET_MODULE_VERSION,GET_MODULE_VERSION_resp_t> {
 	static void process_status_res(ncp_generic_status_t& status,GET_MODULE_VERSION_resp_t* res) {
-    	res->fwVersion = 0x100;
-    	res->stackVersion = zboss_version_get();
-    	res->protocolVersion = 0x100;
+    	res->fwVersion = 0x504;
+        res->stackVersion = zboss_version_get();
+        res->protocolVersion = ZB_PROTOCOL_VERSION;
     }
 };
 
@@ -59,7 +61,8 @@ struct zb_ncp::cmd_handle<NCP_RESET> : immediate_cmd_process<NCP_RESET>,
             zb_bdb_reset_via_local_action(0);
         }
         ESP_LOGI(TAG,"restart");
-        esp_restart();
+        app::ctx_t ctx = {app::EVENT_RESET, 0};
+        app::send_event(ctx);
     }
 };
 
@@ -114,7 +117,7 @@ struct GET_ZIGBEE_CHANNEL_MASK_resp_t {
 } __attribute__((packed)) __attribute__ ((aligned(1)));;;
 template <>
 struct zb_ncp::cmd_handle<GET_ZIGBEE_CHANNEL_MASK> : immediate_cmd_process<GET_ZIGBEE_CHANNEL_MASK>,
-		general_status_res<GET_MODULE_VERSION,GET_ZIGBEE_CHANNEL_MASK_resp_t> {
+		general_status_res<GET_ZIGBEE_CHANNEL_MASK,GET_ZIGBEE_CHANNEL_MASK_resp_t> {
 	static void process_status_res(ncp_generic_status_t& status,GET_ZIGBEE_CHANNEL_MASK_resp_t* res) {
     	res->len = 1;
     	res->page = 0;
@@ -168,7 +171,7 @@ struct zb_ncp::cmd_handle<GET_ZIGBEE_CHANNEL> : immediate_cmd_process<GET_ZIGBEE
 // },
 template <>
 struct zb_ncp::cmd_handle<GET_PAN_ID> : immediate_cmd_process<GET_PAN_ID>,
-		general_status_res<GET_PAN_ID,unaligned_uint16_t> {
+		general_status_res<GET_PAN_ID,uint16_t> {
 	static void process_status_res(ncp_generic_status_t& status,unaligned_uint16_t*  res) {
     	*res = zb_get_pan_id();
     }
@@ -356,7 +359,20 @@ template <>
 struct zb_ncp::cmd_handle<GET_EXTENDED_PAN_ID> : immediate_cmd_process<GET_EXTENDED_PAN_ID>,
 		general_status_res<GET_EXTENDED_PAN_ID,zb_ext_pan_id_t> {
 	static void process_status_res(ncp_generic_status_t& status, zb_ext_pan_id_t* res) {
-		zb_get_extended_pan_id(*res);
+		zb_uint8_t ext_pan_id[8];
+		zb_get_extended_pan_id(ext_pan_id);
+
+        zb_uint8_t ext_pan_id_reversed[8];
+        ext_pan_id_reversed[0] = ext_pan_id[7];
+        ext_pan_id_reversed[1] = ext_pan_id[6];
+        ext_pan_id_reversed[2] = ext_pan_id[5];
+        ext_pan_id_reversed[3] = ext_pan_id[4];
+        ext_pan_id_reversed[4] = ext_pan_id[3];
+        ext_pan_id_reversed[5] = ext_pan_id[2];
+        ext_pan_id_reversed[6] = ext_pan_id[1];
+        ext_pan_id_reversed[7] = ext_pan_id[0];
+
+        memcpy(*res, ext_pan_id_reversed, 8);
     }
 };
 
@@ -1638,3 +1654,14 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     }
 };
 
+
+static void dummy_cb_manuf_code(zb_ret_t status) {}
+
+template <>
+struct zb_ncp::cmd_handle<ZDO_SET_NODE_DESC_MANUF_CODE> : immediate_cmd_process<ZDO_SET_NODE_DESC_MANUF_CODE>,
+		general_status_arg<ZDO_SET_NODE_DESC_MANUF_CODE,uint16_t> {
+	static void process_status_arg(ncp_generic_status_t& status, uint16_t arg) {
+		ESP_LOGI(TAG, "ZDO_SET_NODE_DESC_MANUF_CODE: 0x%04X", arg);
+        zb_set_node_descriptor_manufacturer_code_req(arg, dummy_cb_manuf_code);
+    }
+};

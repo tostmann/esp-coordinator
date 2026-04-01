@@ -66,7 +66,7 @@ COMMAND(ZDO_MGMT_NWK_UPDATE_REQ,                0x0211)
     // ZDO_GET_STATS = 0x0213,
 COMMAND(ZDO_DEV_AUTHORIZED_IND,                 0x0214)
 COMMAND(ZDO_DEV_UPDATE_IND,                     0x0215)
-    // ZDO_SET_NODE_DESC_MANUF_CODE = 0x0216,
+    COMMAND(ZDO_SET_NODE_DESC_MANUF_CODE,                 0x0216)
 
     // // Application Support Sub-layer
 COMMAND(APSDE_DATA_REQ,                         0x0301)

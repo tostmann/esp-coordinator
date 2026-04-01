@@ -86,6 +86,12 @@ esp_err_t app::start_int() {
 	if (res != ESP_OK)
 		return res;
 
+    // https://github.com/andryblack/esp-coordinator/issues/11 - Add an NCP reset response after firmware startup #11
+    uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F}; //ack
+    uint8_t raw_data1[] = {0xDE, 0xAD, 0x0E, 0x00, 0x06, 0xC0, 0x5D, 0x50, 0xD4, 0x00, 0x01, 0x02, 0x00, 0xFF, 0x00, 0x00}; //ответ
+    transport::send(raw_data, sizeof(raw_data));
+    transport::send(raw_data1, sizeof(raw_data1));
+
  	// uint8_t outdata[2] = { 0,0 };
     // esp_ncp_header_t header = {{0,0,0,},NCP_RESET,0,0};
     // esp_ncp_resp_input(&header, outdata, sizeof(outdata)); 
