@@ -1,3 +1,5 @@
+#include "esp_partition.h"
+#include "nvs_flash.h"
 #include "app.h"
 
 #include "commands_helpers.h"
@@ -611,6 +613,22 @@ SINGLE_CMD_DELAYED_DECL(NWK_FORMATION)
     //     request: [{name: 'duration', type: DataType.UINT8}],
     //     response: [...commonResponse],
     // },
+template <>
+struct zb_ncp::cmd_handle<NWK_PERMIT_JOINING> : immediate_cmd_process<NWK_PERMIT_JOINING>,
+		general_status_arg<NWK_PERMIT_JOINING,uint8_t> {
+		static void process_status_arg(ncp_generic_status_t& status, uint8_t duration) {
+        zb_bufid_t buf = zb_buf_get_out();
+        if (!buf) {
+            status = GENERIC_NO_RESOURCES;
+            return;
+        }
+        zb_zdo_mgmt_permit_joining_req_param_t *req = ZB_BUF_GET_PARAM(buf, zb_zdo_mgmt_permit_joining_req_param_t);
+        req->dest_addr = 0x0000; // send to self
+        req->permit_duration = duration;
+        req->tc_significance = 1;
+        zb_zdo_mgmt_permit_joining_req(buf, [](uint8_t buf){ zb_buf_free(buf); });
+    }
+};
 
 // // Start without forming a new network.
 // [CommandId.NWK_START_WITHOUT_FORMATION]: {
