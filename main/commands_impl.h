@@ -1665,3 +1665,41 @@ struct zb_ncp::cmd_handle<ZDO_SET_NODE_DESC_MANUF_CODE> : immediate_cmd_process<
         zb_set_node_descriptor_manufacturer_code_req(arg, dummy_cb_manuf_code);
     }
 };
+
+// [CommandId.GET_NETWORK_BACKUP]: {
+//     request: [],
+//     response: [
+//         ...commonResponse,
+//         {name: 'panId', type: DataType.UINT16},
+//         {name: 'extPanId', type: DataType.EXTENDED_PAN_ID},
+//         {name: 'channel', type: DataType.UINT8},
+//         {name: 'nwkKey', type: DataType.SEC_KEY},
+//     ],
+// }
+struct GET_NETWORK_BACKUP_resp_t {
+	uint16_t panId;
+	uint8_t extPanId[8];
+	uint8_t channel;
+	uint8_t nwkKey[16];
+} __attribute__((packed));
+
+extern "C" uint8_t* secur_nwk_key_by_seq(uint8_t seq);
+
+template <>
+struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP>,
+		general_status_res<GET_NETWORK_BACKUP,GET_NETWORK_BACKUP_resp_t> {
+	static void process_status_res(ncp_generic_status_t& status, GET_NETWORK_BACKUP_resp_t* res) {
+		res->panId = zb_get_pan_id();
+		res->channel = zb_get_current_channel();
+		
+		zb_get_extended_pan_id(res->extPanId); 
+		
+		uint8_t* key = secur_nwk_key_by_seq(0);
+		if (key) {
+			memcpy(res->nwkKey, key, 16);
+		} else {
+			memset(res->nwkKey, 0, 16);
+		}
+    }
+};
+
