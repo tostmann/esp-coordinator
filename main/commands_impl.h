@@ -1735,7 +1735,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 		
 		// Note: The extPanId needs to be reversed back if the JS sends it in Big-Endian, 
 		// but since we read/write memory directly in GET_NETWORK_BACKUP, it should be symmetric.
-		esp_zb_ieee_addr_t ext_pan;
+		zb_ieee_addr_t ext_pan;
 		memcpy(ext_pan, arg.extPanId, 8);
 		zb_set_extended_pan_id(ext_pan);
 		
