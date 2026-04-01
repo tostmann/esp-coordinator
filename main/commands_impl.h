@@ -1737,7 +1737,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 		memcpy(ext_pan, arg.extPanId, 8);
 		zb_set_extended_pan_id(ext_pan);
 		
-		zb_set_nwk_channel_list(1 << arg.channel);
+		zb_set_channel_mask(1 << arg.channel);
 		
 		// Warning: Setting NWK key dynamically in ZBOSS 1.6 requires an API
 		// Usually we can use zb_secur_setup_nwk_key
