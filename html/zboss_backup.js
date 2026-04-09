@@ -226,13 +226,21 @@ async function doRestore() {
         return;
     }
     
+    let port;
+    try {
+        // Must be called immediately on user action before any other awaits!
+        port = await navigator.serial.requestPort();
+    } catch (e) {
+        logger("Error: " + e);
+        return;
+    }
+    
     const file = input.files[0];
     const buffer = await file.arrayBuffer();
     const data = new Uint8Array(buffer);
     const totalSize = data.length;
 
     try {
-        const port = await navigator.serial.requestPort();
         const zboss = new ZbossSerial(port, logger);
         await zboss.connect();
         
