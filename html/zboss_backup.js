@@ -97,7 +97,9 @@ class ZbossSerial {
             this.buffer = this.buffer.slice(packet_len + 2);
 
             const isACK = (frame[5] & 0x01) === 1;
+            const sequence = (frame[5] >> 2) & 0x03;
             const ackSeq = (frame[5] >> 4) & 0x03;
+            this.recvSeq = sequence;
 
             if (isACK && packet_len === 5) {
                 // Ignore empty ACKs
@@ -107,7 +109,7 @@ class ZbossSerial {
             if (packet_len > 5) {
                 const payload = frame.slice(9); // Skip header and crc16
                 // Send ACK back
-                this.sendAck(ackSeq);
+                this.sendAck(this.recvSeq);
 
                 // Assuming it's a response
                 const cmdId = payload[2] | (payload[3] << 8);
@@ -146,7 +148,7 @@ class ZbossSerial {
         out[0] = 0xDE; out[1] = 0xAD;
         out[2] = packetLen & 0xFF; out[3] = (packetLen >> 8) & 0xFF;
         out[4] = 0x06; // type
-        out[5] = 0xC0 | ((this.seq & 0x03) << 2);
+        out[5] = 0xC0 | ((this.seq & 0x03) << 2) | (((this.recvSeq || 0) & 0x03) << 4);
         out[6] = crc8(out.slice(2, 6));
         
         const crc = crc16(reqData);
