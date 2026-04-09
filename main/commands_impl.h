@@ -1684,86 +1684,98 @@ struct zb_ncp::cmd_handle<ZDO_SET_NODE_DESC_MANUF_CODE> : immediate_cmd_process<
     }
 };
 
-// [CommandId.GET_NETWORK_BACKUP]: {
-//     request: [],
-//     response: [
-//         ...commonResponse,
-//         {name: 'panId', type: DataType.UINT16},
-//         {name: 'extPanId', type: DataType.EXTENDED_PAN_ID},
-//         {name: 'channel', type: DataType.UINT8},
-//         {name: 'nwkKey', type: DataType.SEC_KEY},
-//     ],
-// }
-struct GET_NETWORK_BACKUP_resp_t {
-	uint16_t panId;
-	uint8_t extPanId[8];
-	uint8_t channel;
-	uint8_t nwkKey[16];
-} __attribute__((packed));
-
-extern "C" uint8_t* secur_nwk_key_by_seq(uint8_t seq);
+#include "esp_partition.h"
 
 template <>
-struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP>,
-		general_status_res<GET_NETWORK_BACKUP,GET_NETWORK_BACKUP_resp_t> {
-	static void process_status_res(ncp_generic_status_t& status, GET_NETWORK_BACKUP_resp_t* res) {
-		res->panId = zb_get_pan_id();
-		res->channel = zb_get_current_channel();
-		
-		zb_get_extended_pan_id(res->extPanId); 
-		
-		uint8_t* key = secur_nwk_key_by_seq(0);
-		if (key) {
-			memcpy(res->nwkKey, key, 16);
-		} else {
-			memset(res->nwkKey, 0, 16);
-		}
+struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP> {
+    static constexpr size_t resp_buffer_size = 200;
+    static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        uint32_t offset = 0;
+        if (inlen >= 4) {
+            offset = *(uint32_t*)inbuffer;
+        }
+        
+        uint32_t total_size = 0xA000;
+        uint32_t len = 128;
+        if (offset + len > total_size) {
+            len = (total_size > offset) ? (total_size - offset) : 0;
+        }
+        
+        auto full_res = reinterpret_cast<generic_response_t*>(outdata);
+        full_res->category = STATUS_CATEGORY_GENERIC;
+        full_res->status = GENERIC_OK;
+        
+        uint8_t* payload = outdata + sizeof(generic_response_t);
+        memcpy(payload, &total_size, 4);
+        memcpy(payload + 4, &len, 4);
+        
+        if (len > 0) {
+            if (offset < 0x6000) {
+                uint32_t read_len = len;
+                if (offset + read_len > 0x6000) read_len = 0x6000 - offset;
+                const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+                if (nvs_part) esp_partition_read(nvs_part, offset, payload + 8, read_len);
+                
+                if (read_len < len) {
+                    const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+                    if (zb_part) esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
+                }
+            } else {
+                const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+                if (zb_part) esp_partition_read(zb_part, offset - 0x6000, payload + 8, len);
+            }
+        }
+        
+        return sizeof(generic_response_t) + 8 + len;
     }
 };
 
-
-// ZBOSS APIs are already mapped internally
-
-// [CommandId.RESTORE_NETWORK]: {
-//     request: [
-//         {name: 'panId', type: DataType.UINT16},
-//         {name: 'extPanId', type: DataType.EXTENDED_PAN_ID},
-//         {name: 'channel', type: DataType.UINT8},
-//         {name: 'nwkKey', type: DataType.SEC_KEY},
-//     ],
-//     response: [...commonResponse],
-// }
-struct RESTORE_NETWORK_req_t {
-	uint16_t panId;
-	uint8_t extPanId[8];
-	uint8_t channel;
-	uint8_t nwkKey[16];
-} __attribute__((packed));
-
 template <>
-struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK>,
-		general_status_arg_res<RESTORE_NETWORK,RESTORE_NETWORK_req_t,uint8_t> {
-	static void process_status_arg_res(ncp_generic_status_t& status, const RESTORE_NETWORK_req_t& arg, uint8_t* res) {
-		// Restore network parameters logic
-		// This will set the pan ID, ext pan ID, channel and NWK key
-		
-		zb_set_pan_id(arg.panId);
-		
-		// Note: The extPanId needs to be reversed back if the JS sends it in Big-Endian, 
-		// but since we read/write memory directly in GET_NETWORK_BACKUP, it should be symmetric.
-		zb_ieee_addr_t ext_pan;
-		memcpy(ext_pan, arg.extPanId, 8);
-		zb_set_extended_pan_id(ext_pan);
-		
-		zb_set_channel_mask(1 << arg.channel);
-		
-		// Warning: Setting NWK key dynamically in ZBOSS 1.6 requires an API
-		// Usually we can use zb_secur_setup_nwk_key
-		extern void zb_secur_setup_nwk_key(uint8_t *key, uint8_t i);
-		zb_secur_setup_nwk_key((uint8_t*)arg.nwkKey, 0);
-
-		// ZBOSS automatically writes this to NVS on init
-		*res = 0; // Success
+struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK> {
+    static constexpr size_t resp_buffer_size = 0;
+    static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        if (inlen >= 8) {
+            const uint8_t* in_ptr = (const uint8_t*)inbuffer;
+            uint32_t offset = *(uint32_t*)in_ptr;
+            uint32_t total_size = *(uint32_t*)(in_ptr + 4);
+            uint32_t chunk_length = inlen - 8;
+            
+            if (offset == 0) {
+                extern esp_err_t nvs_flash_deinit(void);
+                nvs_flash_deinit();
+                
+                const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+                const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+                if (nvs_part) esp_partition_erase_range(nvs_part, 0, 0x6000);
+                if (zb_part) esp_partition_erase_range(zb_part, 0, 0x4000);
+            }
+            
+            if (chunk_length > 0) {
+                if (offset < 0x6000) {
+                    uint32_t write_len = chunk_length;
+                    if (offset + write_len > 0x6000) write_len = 0x6000 - offset;
+                    const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+                    if (nvs_part) esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
+                    
+                    if (write_len < chunk_length) {
+                        const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+                        if (zb_part) esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
+                    }
+                } else {
+                    const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+                    if (zb_part) esp_partition_write(zb_part, offset - 0x6000, in_ptr + 8, chunk_length);
+                }
+            }
+            
+            if (offset + chunk_length >= total_size) {
+                xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); }, "reboot", 2048, NULL, 5, NULL);
+            }
+        }
+        
+        auto full_res = reinterpret_cast<generic_response_t*>(outdata);
+        full_res->category = STATUS_CATEGORY_GENERIC;
+        full_res->status = GENERIC_OK;
+        return sizeof(generic_response_t);
     }
 };
 

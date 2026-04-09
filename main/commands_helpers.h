@@ -31,7 +31,7 @@ struct zb_ncp::immediate_cmd_process {
     static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
         uint8_t outdata[Cmd::resp_buffer_size+sizeof(zb_ncp::cmd_t)];
         zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
-        auto outlen = sizeof(outdata) + Cmd::process_immediate(buffer,len,&outdata[sizeof(zb_ncp::cmd_t)],sizeof(outdata)-sizeof(zb_ncp::cmd_t));
+        auto outlen = sizeof(zb_ncp::cmd_t) + Cmd::process_immediate(buffer,len,&outdata[sizeof(zb_ncp::cmd_t)],sizeof(outdata)-sizeof(zb_ncp::cmd_t));
        	*out_cmd = cmd;
        	out_cmd->type = RESPONSE;
         zb_ncp::send_cmd_data( outdata, outlen ); 
@@ -56,7 +56,7 @@ struct zb_ncp::delayed_cmd_process : public ResolveStrategyT<CmdId>{
             zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
             ResolveStrategy::resolve(*out_cmd);
             out_cmd->type = RESPONSE;
-            auto outlen = sizeof(outdata) + Cmd::finish_delayed(status,&outdata[sizeof(zb_ncp::cmd_t)],sizeof(outdata)-sizeof(zb_ncp::cmd_t));
+            auto outlen = sizeof(zb_ncp::cmd_t) + Cmd::finish_delayed(status,&outdata[sizeof(zb_ncp::cmd_t)],sizeof(outdata)-sizeof(zb_ncp::cmd_t));
             zb_ncp::send_cmd_data( outdata, outlen ); 
             return true;
         } 
