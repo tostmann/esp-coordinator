@@ -44,6 +44,14 @@ This project is an actively maintained, heavily optimized evolution of the origi
 * **Modern ZBOSS SDK:** Fully ported to ZBOSS SDK v1.6.x.
 
 
+## Zigbee2MQTT Integration & Backups
+
+While this coordinator works perfectly with the standard Zigbee2MQTT release, **we highly recommend using our customized Docker image** (`ghcr.io/tostmann/zigbee2mqtt-esp32:latest`). 
+
+Our custom image unlocks **Native Bare-Metal Backups**, allowing Zigbee2MQTT to automatically backup and restore the ESP32's complete NVRAM over the serial protocol. This means if your hardware breaks, you can just plug in a new ESP32 and Z2M will automatically restore your entire network (including frame counters) without having to re-pair any devices.
+
+👉 **[Read the full Zigbee2MQTT Setup & Backup Guide](ZIGBEE2MQTT.md)**
+
 ## Configuration Example (zigbee2mqtt)
 
 Use the stable JTAG USB serial port in your `configuration.yaml` and configure the transmit power to fully utilize the ESP32-C6 amplifier:
