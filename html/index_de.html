@@ -141,22 +141,7 @@
         </div>
     </div>
 
-    <div class="flasher-box" style="background: #f0fdf4; border-color: #86efac;">
-        <h3 style="margin-top:0;">2. Natives NVRAM Backup & Restore</h3>
-        <p style="font-size: 14px; color: #475569;">Lade dein komplettes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator über das ZBOSS Protokoll herunter oder stelle ein Backup wieder her.</p>
-        
-        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
-            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Backup Herunterladen (.bin)</button>
-            <label style="padding: 10px 15px; background: var(--success); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
-                Backup Wiederherstellen
-                <input type="file" id="restoreFile" style="display: none;" onchange="doRestore()">
-            </label>
-        </div>
-        <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
-        <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
-    </div>
-
-    <h2>3. Zigbee2MQTT (Z2M) Einrichtung</h2>
+    <h2>2. Zigbee2MQTT (Z2M) Einrichtung</h2>
     <p style="font-size: 14px; line-height: 1.6;">
         Sobald das Flashen abgeschlossen ist, kann der Coordinator in Zigbee2MQTT eingebunden werden.
         Passe dazu deine <code>configuration.yaml</code> (unter `zigbee2mqtt/data/`) wie folgt an:
@@ -179,6 +164,24 @@ advanced:
         • Die Firmware ist auf maximale Stabilität für das <b>ZBOSS</b> Protokoll optimiert.<br>
         • Wenn Z2M beim Starten "Port is busy" meldet, stellen Sie sicher, dass keine anderen Dienste (wie z.B. ModemManager) den Port blockieren.<br>
         • ZHA/Zigpy wird offiziell nicht unterstützt; bitte ausschließlich Zigbee2MQTT verwenden.
+    </div>
+
+    <div class="flasher-box" style="background: #f0fdf4; border-color: #86efac; margin-top: 40px;">
+        <h3 style="margin-top:0;">3. Natives NVRAM Backup & Restore (Optional)</h3>
+        <p style="font-size: 14px; color: #475569;">
+            <strong>Für eine Ersteinrichtung wird dies nicht benötigt!</strong><br>
+            Nutze dieses Tool nur, wenn du ein bereits bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterladen oder auf einen neuen ESP32-C6 übertragen möchtest.
+        </p>
+        
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
+            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Backup Herunterladen (.bin)</button>
+            <label style="padding: 10px 15px; background: var(--success); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                Backup Wiederherstellen
+                <input type="file" id="restoreFile" style="display: none;" onchange="doRestore()">
+            </label>
+        </div>
+        <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
+        <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
     </div>
 </div>
 
