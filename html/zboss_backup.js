@@ -42,6 +42,7 @@ class ZbossSerial {
         this.buffer = new Uint8Array(0);
         this.pendingRequests = {};
         this.running = false;
+        this.writeLock = Promise.resolve();
     }
 
     async connect() {
@@ -126,10 +127,10 @@ class ZbossSerial {
         const header = new Uint8Array(7);
         header[0] = 0xDE; header[1] = 0xAD;
         header[2] = 5; header[3] = 0; header[4] = 0x06;
-        header[5] = 0xC1 | ((this.seq & 0x03) << 2) | ((ackSeq & 0x03) << 4);
+        header[5] = 0x01 | ((ackSeq & 0x03) << 4);
         header[6] = crc8(header.slice(2, 6));
-        this.seq = (this.seq + 1) & 0x03;
-        await this.writer.write(header);
+        this.writeLock = this.writeLock.then(() => this.writer.write(header));
+        await this.writeLock;
     }
 
     async sendCommand(cmdId, payload) {
@@ -163,7 +164,8 @@ class ZbossSerial {
                 clearTimeout(timeout);
                 resolve(responsePayload);
             };
-            await this.writer.write(out);
+            this.writeLock = this.writeLock.then(() => this.writer.write(out));
+            await this.writeLock;
         });
     }
 }
