@@ -6,15 +6,16 @@ However, we **highly recommend** using our customized Docker image.
 
 ## Why a Custom Docker Image?
 
-The standard `zigbee-herdsman` library (which powers Zigbee2MQTT) currently lacks full native backup and restore capabilities for the ZBOSS stack used on ESP32-C6/H2 chips. If your ESP32 hardware breaks and you plug in a new one, a standard Zigbee2MQTT setup cannot restore the old network state (Frame Counters, Trust Center Keys, etc.) to the new chip.
+The standard `zigbee-herdsman` library (which powers Zigbee2MQTT) currently lacks full native state transfer capabilities for the ZBOSS stack used on ESP32-C6/H2 chips. If your ESP32 hardware breaks and you plug in a new one, a standard Zigbee2MQTT setup cannot restore the old network state (Frame Counters, Trust Center Keys, etc.) to the new chip.
 
-To solve this, we developed a powerful, chunk-based raw NVRAM backup and restore protocol (`0x0099` / `0x009A`) within this ESP32 firmware. 
+To solve this, we developed a powerful, chunk-based raw NVRAM memory transfer protocol (`0x0099` / `0x009A`) within this ESP32 firmware. 
 
 Our custom Docker image automatically patches Zigbee2MQTT on startup to leverage this protocol. 
 
 ### Benefits of the Custom Image:
-1. **True Bare-Metal Backups:** Zigbee2MQTT will automatically extract the complete 40KB Flash memory (NVS & `zb_storage`) of the ESP32 and save it as a Base64 string inside your standard `coordinator_backup.json`.
-2. **Seamless Hardware Replacement:** If your coordinator dies, simply flash our firmware onto a new ESP32-C6, plug it in, and start Zigbee2MQTT. It will detect the blank chip and automatically stream the entire network memory back onto it. Your devices won't even notice the hardware changed!
+1. **Automated NVRAM Snapshots:** Zigbee2MQTT will automatically extract the complete 40KB Flash memory (NVS & `zb_storage`) of the ESP32 and save it as a Base64 string inside your standard `coordinator_backup.json`. This acts as a rolling snapshot of your network.
+2. **Seamless Hardware Migration:** If your coordinator dies, simply flash our firmware onto a new ESP32-C6, plug it in, and start Zigbee2MQTT. It will detect the blank chip and automatically stream the latest memory snapshot back onto it. 
+   *(**Note:** Because this is a raw memory image containing exact Frame Counters, the snapshot must be recent. If too many messages were sent after the snapshot was taken, end devices will reject the new coordinator due to Replay-Attack protection.)*
 3. **Custom Branding:** The coordinator will proudly identify itself as `busware.de ESP32 (ZBOSS)` in the Zigbee2MQTT frontend and Home Assistant, rather than just a generic `zboss` adapter.
 
 ## How to Use It
@@ -49,4 +50,4 @@ For users running Home Assistant OS with the Add-on store, we plan to provide a 
 
 No. If you prefer to stick to the official `koenkk/zigbee2mqtt` image, everything will still work perfectly. Your devices will pair, route, and function normally. 
 
-The only downside is that you won't have automated, hardware-agnostic backups. If your ESP32 breaks while using the standard image, you will either need to re-pair all your devices to the new coordinator or rely on manual CLI flash-dumping tools (like `esptool.py`) to extract and restore the NVRAM.
+The only downside is that you won't have automated, hardware-agnostic snapshots. If your ESP32 breaks while using the standard image, you will either need to re-pair all your devices to the new coordinator or rely on manual CLI flash-dumping tools (like `esptool.py`) to extract and transfer the raw NVRAM before you swap the hardware.

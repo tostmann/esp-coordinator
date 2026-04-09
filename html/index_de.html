@@ -166,15 +166,20 @@ advanced:
         • ZHA/Zigpy wird offiziell nicht unterstützt; bitte ausschließlich Zigbee2MQTT verwenden.
     </div>
 
-    <div class="flasher-box" style="background: #f0fdf4; border-color: #86efac; margin-top: 40px;">
-        <h3 style="margin-top:0;">3. Natives NVRAM Backup & Restore (Optional)</h3>
+    <div class="flasher-box" style="background: #fffbeb; border-color: #fcd34d; margin-top: 40px;">
+        <h3 style="margin-top:0;">3. Network Transfer Image (Optional)</h3>
         <p style="font-size: 14px; color: #475569;">
             <strong>Für eine Ersteinrichtung wird dies nicht benötigt!</strong><br>
-            Nutze dieses Tool nur, wenn du ein bereits bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterladen oder auf einen neuen ESP32-C6 übertragen möchtest.
+            Nutze dieses Tool, um ein bereits bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterzuladen und auf einen neuen ESP32-C6 zu übertragen.
         </p>
+
+        <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
+            <strong>⚠️ Warnung: Kein Langzeit-Backup!</strong><br>
+            Dies extrahiert ein rohes Speicherabbild mit exakten Frame Countern. Wenn ein zu altes Abbild wiederhergestellt wird (bei dem die Geräte in der Zwischenzeit viele Nachrichten gesendet haben), werden deine Endgeräte den Coordinator zum Schutz vor Replay-Attacken blockieren und müssen neu angelernt werden. <strong>Nutze diese Funktion primär für einen sofortigen Hardware-Tausch.</strong>
+        </div>
         
         <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
-            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Backup Herunterladen (.bin)</button>
+            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Transfer Image Herunterladen</button>
             <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
                 <span id="restoreText">1. Datei wählen</span>
                 <input type="file" id="restoreFile" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. Datei gewählt!';">

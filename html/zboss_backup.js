@@ -177,7 +177,7 @@ async function doBackup() {
         const zboss = new ZbossSerial(port, logger);
         await zboss.connect();
         
-        logger("Starting Backup...");
+        logger("Starting Image Transfer...");
         let offset = 0;
         let totalSize = 0;
         let chunks = [];
@@ -189,7 +189,7 @@ async function doBackup() {
             const response = await zboss.sendCommand(153 /* GET_NETWORK_BACKUP */, payload);
             
             // Response: category(1), status(1), total_size(4), chunk_length(4), data
-            if (response[1] !== 0) throw new Error("Backup command failed");
+            if (response[1] !== 0) throw new Error("Transfer command failed");
             
             const dv = new DataView(response.buffer, response.byteOffset);
             totalSize = dv.getUint32(2, true);
@@ -209,13 +209,13 @@ async function doBackup() {
         for (const c of chunks) { fullBackup.set(c, ptr); ptr += c.length; }
 
         await zboss.disconnect();
-        logger("Backup finished successfully!");
+        logger("Transfer finished successfully!");
 
         // Trigger download
         const blob = new Blob([fullBackup], {type: "application/octet-stream"});
         const link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
-        link.download = "zboss_nvram_backup.bin";
+        link.download = "zboss_network_transfer.bin";
         link.click();
     } catch (e) {
         logger("Error: " + e);
