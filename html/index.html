@@ -142,7 +142,22 @@
         </div>
     </div>
 
-    <h2>2. Zigbee2MQTT (Z2M) Setup</h2>
+    <div class="flasher-box" style="background: #f0fdf4; border-color: #86efac;">
+        <h3 style="margin-top:0;">2. Native NVRAM Backup & Restore</h3>
+        <p style="font-size: 14px; color: #475569;">Extract or restore your entire Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator running our ZBOSS firmware.</p>
+        
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
+            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Download Backup (.bin)</button>
+            <label style="padding: 10px 15px; background: var(--success); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                Restore Backup
+                <input type="file" id="restoreFile" style="display: none;" onchange="doRestore()">
+            </label>
+        </div>
+        <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
+        <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
+    </div>
+
+    <h2>3. Zigbee2MQTT (Z2M) Setup</h2>
     <p style="font-size: 14px; line-height: 1.6;">
         Once flashing is complete, the coordinator can be integrated into Zigbee2MQTT.
         Adjust your <code>configuration.yaml</code> (located at `zigbee2mqtt/data/`) as follows:
@@ -168,5 +183,6 @@ advanced:
     </div>
 </div>
 
+<script src="zboss_backup.js"></script>
 </body>
 </html>
