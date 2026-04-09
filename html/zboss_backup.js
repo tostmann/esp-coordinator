@@ -127,9 +127,9 @@ class ZbossSerial {
         const header = new Uint8Array(7);
         header[0] = 0xDE; header[1] = 0xAD;
         header[2] = 5; header[3] = 0; header[4] = 0x06;
-        header[5] = 0x01 | ((ackSeq & 0x03) << 4);
+        header[5] = 0xC1 | ((ackSeq & 0x03) << 4);
         header[6] = crc8(header.slice(2, 6));
-        this.writeLock = this.writeLock.then(() => this.writer.write(header));
+        this.writeLock = this.writeLock.then(() => this.writer.write(header)).catch(e => this.log(e));
         await this.writeLock;
     }
 
@@ -164,7 +164,7 @@ class ZbossSerial {
                 clearTimeout(timeout);
                 resolve(responsePayload);
             };
-            this.writeLock = this.writeLock.then(() => this.writer.write(out));
+            this.writeLock = this.writeLock.then(() => this.writer.write(out)).catch(e => this.log(e));
             await this.writeLock;
         });
     }
@@ -188,15 +188,15 @@ async function doBackup() {
             const payload = new Uint8Array([offset & 0xFF, (offset >> 8) & 0xFF, (offset >> 16) & 0xFF, (offset >> 24) & 0xFF]);
             const response = await zboss.sendCommand(153 /* GET_NETWORK_BACKUP */, payload);
             
-            // Response: status(1), total_size(4), chunk_length(4), data
-            if (response[0] !== 0) throw new Error("Backup command failed");
+            // Response: category(1), status(1), total_size(4), chunk_length(4), data
+            if (response[1] !== 0) throw new Error("Backup command failed");
             
             const dv = new DataView(response.buffer, response.byteOffset);
-            totalSize = dv.getUint32(1, true);
-            const chunkLen = dv.getUint32(5, true);
+            totalSize = dv.getUint32(2, true);
+            const chunkLen = dv.getUint32(6, true);
             
             if (chunkLen > 0) {
-                chunks.push(response.slice(9, 9 + chunkLen));
+                chunks.push(response.slice(10, 10 + chunkLen));
                 offset += chunkLen;
                 document.getElementById('progress').innerText = `Progress: ${Math.round((offset/totalSize)*100)}%`;
             } else {
@@ -264,7 +264,7 @@ async function doRestore() {
             payload.set(chunk, 8);
 
             const response = await zboss.sendCommand(154 /* RESTORE_NETWORK */, payload);
-            if (response[0] !== 0) throw new Error("Restore command failed at offset " + offset);
+            if (response[1] !== 0) throw new Error("Restore command failed at offset " + offset);
 
             offset += chunk.length;
             document.getElementById('progress').innerText = `Progress: ${Math.round((offset/totalSize)*100)}%`;
