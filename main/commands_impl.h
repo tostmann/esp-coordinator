@@ -1171,7 +1171,7 @@ struct zb_ncp::cmd_handle<ZDO_MATCH_DESC_REQ> : request_cmd_process< ZDO_MATCH_D
     	if (len < 6)
     		return false;
     	auto arg = static_cast<const ZDO_MATCH_DESC_REQ_arg_t*>(buffer);
-    	if ((arg->inputClusterCount + arg->inputClusterCount) > 64) {
+    	if ((arg->inputClusterCount + arg->outputClusterCount) > 64) {
     		return false;
 		}
     	return len >= (6+(arg->inputClusterCount+arg->outputClusterCount)*2);
