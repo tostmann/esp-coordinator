@@ -48,8 +48,22 @@ struct zb_ncp::delayed_cmd_process : public ResolveStrategyT<CmdId>{
     		// immediately so the host's outer timeout doesn't fire on it.
     		// The in-flight original is left untouched and will complete
     		// normally via zboss_signal_handler -> response().
+    		//
+    		// Build the BUSY reply inline rather than going through
+    		// cmd_base<Cmd>::report_failed: cmd_base is CRTP and wants
+    		// Cmd::status_category, which the NWK_FORMATION /
+    		// NWK_START_WITHOUT_FORMATION handlers don't define (they go
+    		// through finish_delayed for their own STATUS_CATEGORY_NWK
+    		// payload). Synthetic BUSY is generic anyway.
     		ESP_LOGW(TAG, "%s: busy, prior request pending", Cmd::name);
-    		cmd_base<Cmd>::report_failed(cmd, GENERIC_BUSY);
+    		uint8_t outdata[sizeof(zb_ncp::cmd_t) + sizeof(generic_response_t)];
+    		auto out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
+    		*out_cmd = cmd;
+    		out_cmd->type = zb_ncp::RESPONSE;
+    		auto resp = reinterpret_cast<generic_response_t*>(out_cmd + 1);
+    		resp->category = STATUS_CATEGORY_GENERIC;
+    		resp->status   = GENERIC_BUSY;
+    		zb_ncp::send_cmd_data(outdata, sizeof(outdata));
     		return;
     	}
         int res = Cmd::start_delayed(buffer,len);
