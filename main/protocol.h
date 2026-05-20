@@ -27,7 +27,13 @@ private:
 	esp_err_t start_int();
 
 	static constexpr size_t RX_BUFFER_SIZE = 1024;
-	static constexpr size_t TX_BUFFER_SIZE = 256;
+	// 2048 covers worst-case ZDO responses with full 64-entry tables:
+	// ZDO_MGMT_LQI_REQ -> 64*sizeof(zb_zdo_neighbor_table_record_t) ~ 1.4 KB,
+	// ZDO_MGMT_BIND_REQ -> 64*sizeof(zb_zdo_binding_table_record_t) ~ 1.5 KB.
+	// Pre-fix size 256 silently rejected anything larger via send_data_int's
+	// "too long" guard, so the host never saw populated neighbor / binding
+	// tables once the network grew past ~10 nodes.
+	static constexpr size_t TX_BUFFER_SIZE = 2048;
 	static constexpr uint8_t ZBOSS_NCP_API_HL = 0x06;
 
 	uint8_t m_rx_buffer[RX_BUFFER_SIZE];

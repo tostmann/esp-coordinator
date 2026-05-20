@@ -128,9 +128,15 @@ void zb_ncp::send_cmd_data(const void* data,size_t size) {
 	}
 }
 void zb_ncp::indication(command_id_t cmd,const void* data,size_t size) {
-	uint8_t buffer[256];
+	// 512 covers the worst-case APSDE_DATA_IND: data_indication() builds a
+	// ~24-byte header followed by up to 255 bytes of ZCL payload (~279 total),
+	// and we still need slack here for the 4-byte indication prefix and any
+	// future indication types with larger payloads. Pre-fix 256 silently
+	// dropped any indication with > 252 bytes of payload — i.e. OTA image
+	// blocks and multi-attribute reads vanished without the host noticing.
+	uint8_t buffer[512];
 	if ((size+4) > sizeof(buffer)) {
-		ESP_LOGE(TAG,"Indication too long");
+		ESP_LOGE(TAG,"Indication too long: %zu", size+4);
 		return;
 	}
 	buffer[0] = 0;
