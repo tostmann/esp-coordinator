@@ -8,8 +8,11 @@
 /mosquitto.conf
 /*.log
 /*.json
+/CLAUDE.md
+/GEMINI.md
 /FACTS.md
 /MEMORY.md
+/HARDWARE_STATUS.md
 /patch*.py
 /pr*.patch
 /probe_stick.py
