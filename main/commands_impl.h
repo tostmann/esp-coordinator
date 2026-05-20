@@ -34,7 +34,7 @@ struct GET_MODULE_VERSION_resp_t {
 	uint32_t fwVersion;
 	uint32_t stackVersion;
 	uint32_t protocolVersion;
-} __attribute__((packed)) __attribute__ ((aligned(1)));;;
+} __attribute__((packed)) __attribute__ ((aligned(1)));
 template <>
 struct zb_ncp::cmd_handle<GET_MODULE_VERSION> : immediate_cmd_process<GET_MODULE_VERSION>,
 		general_status_res<GET_MODULE_VERSION,GET_MODULE_VERSION_resp_t> {
@@ -122,7 +122,7 @@ struct GET_ZIGBEE_CHANNEL_MASK_resp_t {
 	uint8_t len;
 	uint8_t page;
 	uint32_t mask;
-} __attribute__((packed)) __attribute__ ((aligned(1)));;;
+} __attribute__((packed)) __attribute__ ((aligned(1)));
 template <>
 struct zb_ncp::cmd_handle<GET_ZIGBEE_CHANNEL_MASK> : immediate_cmd_process<GET_ZIGBEE_CHANNEL_MASK>,
 		general_status_res<GET_ZIGBEE_CHANNEL_MASK,GET_ZIGBEE_CHANNEL_MASK_resp_t> {
@@ -143,7 +143,7 @@ struct zb_ncp::cmd_handle<GET_ZIGBEE_CHANNEL_MASK> : immediate_cmd_process<GET_Z
 struct SET_ZIGBEE_CHANNEL_MASK_arg_t {
 	uint8_t page;
 	uint32_t mask;
-} __attribute__((packed)) __attribute__ ((aligned(1)));;;
+} __attribute__((packed)) __attribute__ ((aligned(1)));
 template <>
 struct zb_ncp::cmd_handle<SET_ZIGBEE_CHANNEL_MASK> : immediate_cmd_process<SET_ZIGBEE_CHANNEL_MASK>,
 		general_status_arg<SET_ZIGBEE_CHANNEL_MASK,SET_ZIGBEE_CHANNEL_MASK_arg_t> {
@@ -205,7 +205,7 @@ struct zb_ncp::cmd_handle<SET_PAN_ID> : immediate_cmd_process<SET_PAN_ID>,
 struct GET_LOCAL_IEEE_ADDR_resp_t {
 	uint8_t mac;
 	uint8_t ieee[8];
-}__attribute__((packed)) __attribute__ ((aligned(1)));;
+}__attribute__((packed)) __attribute__ ((aligned(1)));
 template <>
 struct zb_ncp::cmd_handle<GET_LOCAL_IEEE_ADDR> : immediate_cmd_process<GET_LOCAL_IEEE_ADDR>,
 		general_status_arg_res<GET_LOCAL_IEEE_ADDR,uint8_t,GET_LOCAL_IEEE_ADDR_resp_t> {
