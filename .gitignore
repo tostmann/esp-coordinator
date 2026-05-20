@@ -22,7 +22,7 @@
 /.deploy_key
 /.deploy_key.pub
 /idf_env.sh
-/binaries/
+/binaries/*
 !/binaries/factory.bin
 /main/*.orig
 /main/*.rej
