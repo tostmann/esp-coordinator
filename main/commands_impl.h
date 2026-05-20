@@ -1,6 +1,7 @@
 #include "esp_partition.h"
 #include "nvs_flash.h"
 #include "app.h"
+#include "version.h"
 
 #include "commands_helpers.h"
 #include <esp_mac.h>
@@ -38,7 +39,12 @@ template <>
 struct zb_ncp::cmd_handle<GET_MODULE_VERSION> : immediate_cmd_process<GET_MODULE_VERSION>,
 		general_status_res<GET_MODULE_VERSION,GET_MODULE_VERSION_resp_t> {
 	static void process_status_res(ncp_generic_status_t& status,GET_MODULE_VERSION_resp_t* res) {
-    	res->fwVersion = 0x504;
+    	// Encode firmware build into the uint32 Z2M shows as fwVersion.
+    	// Layout: MAJOR.MINOR.BUILD with 16-bit BUILD; v1.1.0 = 0x01010000.
+    	// Sourced from main/version.h (configure_file from version.h.in).
+    	res->fwVersion = (uint32_t(FW_VERSION_MAJOR) << 24)
+    	               | (uint32_t(FW_VERSION_MINOR) << 16)
+    	               | (uint32_t(FW_VERSION_BUILD) & 0xFFFF);
         res->stackVersion = zboss_version_get();
         res->protocolVersion = ZB_PROTOCOL_VERSION;
     }
