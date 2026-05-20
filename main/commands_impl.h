@@ -970,15 +970,18 @@ struct zb_ncp::cmd_handle<ZDO_IEEE_ADDR_REQ> : request_cmd_process< ZDO_IEEE_ADD
         	auto dst = reinterpret_cast<uint8_t*>(out_cmd+1)+outlen;
         	auto num = ext->num_assoc_dev;
         	if (num > 16) {
-        		num = 16;
         		ESP_LOGE(TAG,"truncate ZDO_IEEE_ADDR_REQ response %d",int(num));
+        		num = 16;
         	}
         	*dst++ = num; ++outlen;
         	if (num) {
         		auto ext2 = reinterpret_cast<const zb_zdo_ieee_addr_resp_ext2_t*>(ext+1);
         		*dst++ = ext2->start_index; ++outlen;
         		auto nwks = reinterpret_cast<const uint16_t*>(ext2+1);
-        		for (uint8_t i=0;i<ext->num_assoc_dev;++i) {
+        		// MUST use capped `num`, not ext->num_assoc_dev — the latter is
+        		// the untruncated remote-reported count; iterating past `num`
+        		// overflows the response stack buffer (additional_buffer_size = 2+16*2).
+        		for (uint8_t i=0;i<num;++i) {
         			*reinterpret_cast<uint16_t*>(dst) = *nwks++;
         			dst += 2; outlen+=2;
         		}
@@ -1030,15 +1033,16 @@ struct zb_ncp::cmd_handle<ZDO_NWK_ADDR_REQ> : request_cmd_process< ZDO_NWK_ADDR_
         	auto dst = reinterpret_cast<uint8_t*>(out_cmd+1)+outlen;
         	auto num = ext->num_assoc_dev;
         	if (num > 16) {
-        		num = 16;
         		ESP_LOGE(TAG,"truncate ZDO_NWK_ADDR_REQ response %d",int(num));
+        		num = 16;
         	}
         	*dst++ = num; ++outlen;
         	if (num) {
         		auto ext2 = reinterpret_cast<const zb_zdo_nwk_addr_resp_ext2_t*>(ext+1);
         		*dst++ = ext2->start_index; ++outlen;
         		auto nwks = reinterpret_cast<const uint16_t*>(ext2+1);
-        		for (uint8_t i=0;i<ext->num_assoc_dev;++i) {
+        		// MUST use capped `num`, see sibling handler ZDO_IEEE_ADDR_REQ.
+        		for (uint8_t i=0;i<num;++i) {
         			*reinterpret_cast<uint16_t*>(dst) = *nwks++;
         			dst += 2; outlen+=2;
         		}
