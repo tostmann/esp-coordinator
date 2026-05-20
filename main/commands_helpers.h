@@ -195,14 +195,27 @@ struct request_cmd_resolver {
 			}
 		}
 		if (!res) {
-			auto old = old_cntr();
+			// All MAX_PARALLEL_REQUESTS slots are busy. Find the OLDEST S_EXEC
+			// slot (smallest `old` counter) and reuse it. The previous code
+			// scanned with `req.old < old` where `old = old_cntr()` is the
+			// current global counter — every S_EXEC slot trivially matched and
+			// `res` ended up pointing at the LAST one iterated, not the oldest.
+			size_t oldest = SIZE_MAX;
 			for (auto& req:storage()) {
-				if (req.state == request_t::S_EXEC && req.old < old) {
+				if (req.state == request_t::S_EXEC && req.old < oldest) {
+					oldest = req.old;
 					res = &req;
 				}
 			}
 			if (res) {
-				ESP_LOGW(TAG,"Override request %d",int(res->cmd.tsn));
+				ESP_LOGW(TAG,"Override request tsn=%d old=%zu",
+				         int(res->tsn), oldest);
+				// Clear state so a late ZBOSS callback for the abandoned tsn
+				// no longer matches this slot in resolve() — without this, a
+				// stale response could be routed to whichever new request the
+				// slot is about to be reassigned to (potential mis-dispatch
+				// of e.g. an IEEE_ADDR response to a NODE_DESC handler).
+				res->state = request_t::S_NONE;
 			}
 		}
 		if (res) {
