@@ -213,7 +213,14 @@ esp_err_t protocol::on_rx_int(const void* data,size_t size) {
 esp_err_t protocol::init_int() {
 	ESP_LOGI(TAG,"init");
 	m_rx_buffer_pos = 0;
-	m_tx_seq = 0;
+	// Start at 1, not 0 — the hardcoded boot-time raw_data ACK and NCP_RESET
+	// response in app::start_int() are sent via transport directly (bypassing
+	// this protocol layer) and both carry packet_seq=0 hardcoded. If the
+	// first dynamic packet were also seq=0, the host would see three packets
+	// from us with the same seq before any advancement, which some host
+	// implementations treat as duplicate-drop. next_seq() then cycles
+	// 1->2->3->1 (seq 0 only used at boot).
+	m_tx_seq = 1;
 	m_tx_sem = xSemaphoreCreateMutex();
     if (!m_tx_sem) {
         ESP_LOGE(TAG, "Input semaphore create error");
