@@ -1,0 +1,12 @@
+// AUTO-GENERATED via configure_file from main/version.h.in by main/CMakeLists.txt.
+// Source of truth: ../version.txt + ../build_number.txt
+//   (bumped by scripts/bump_build.sh, invoked from idf_env.sh before build).
+// Do NOT edit by hand — changes are overwritten on every CMake configure.
+#pragma once
+
+#define FW_VERSION_MAJOR  @ESP_COORD_VERSION_MAJOR@
+#define FW_VERSION_MINOR  @ESP_COORD_VERSION_MINOR@
+#define FW_VERSION_BUILD  @ESP_COORD_VERSION_BUILD@
+
+#define FW_VERSION_STRING "@ESP_COORD_VERSION_STR@"
+#define FW_BUILD_DATE     "@ESP_COORD_BUILD_DATE@"
