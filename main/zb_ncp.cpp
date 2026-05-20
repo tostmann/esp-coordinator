@@ -162,6 +162,17 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
     int(ind->src_endpoint),int(ind->dst_endpoint),int(len),ind->tsn);
  
   if (ind->src_endpoint == 0) {
+    // ZDP frame from a remote device. Most clusters we let the ZBOSS stack
+    // parse normally — but cluster 0x8004 (Simple_Desc_rsp) needs a tolerant
+    // intercept because the stack's strict frame-length check drops some
+    // Tuya devices' malformed responses (see zb_ncp.h for the issue link).
+    if (ind->clusterid == 0x8004 && begin && len >= 5) {
+      if (zb_ncp::try_intercept_simple_desc_rsp(begin, len)) {
+        ESP_LOGD(TAG, "Simple_Desc_rsp intercepted (tsn=%d), bypassing stack parser", int(begin[0]));
+        zb_buf_free(param);
+        return ZB_TRUE;
+      }
+    }
     ESP_LOGD(TAG,"skip, %d %d",int(ind->src_endpoint),int(ind->dst_endpoint));
     return ZB_FALSE;
   }
@@ -407,5 +418,146 @@ extern "C" bool zb_zcl_green_power_cluster_handler(zb_uint8_t param) {
     // ESP_LOGI(TAG, "Received ZGP %s message: endpoint(%d), cluster(0x%x), command(0x%x)", message->info.command.direction == 1 ? "proxy" : "sink",
     //          message->info.dst_endpoint, message->info.cluster, message->info.command.id);
     ESP_LOGW(TAG,"Green power cluster handle");
+    return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Simple_Desc_rsp intercept — bypasses libzboss_stack.zczr.a's strict
+// frame-length check on cluster 0x8004 (see header comment in zb_ncp.h).
+//
+// ZDP wire format for Simple_Desc_rsp (zigbee spec 2.4.4.1.5):
+//   TSN        (1)   ← matched against pending request
+//   STATUS     (1)
+//   NWK_ADDR   (2, little-endian)
+//   LENGTH     (1)   ← declared length of the simple_desc body
+//   SIMPLE_DESC (LENGTH bytes):
+//     endpoint        (1)
+//     profile_id      (2)
+//     device_id       (2)
+//     device_version  (low 4 bits) + reserved (high 4 bits)  → packed in (1)
+//     in_count        (1)
+//     in_cluster_list (2 * in_count)
+//     out_count       (1)
+//     out_cluster_list(2 * out_count)
+// Some Tuya devices ship trailing extra bytes; we ignore anything past LENGTH.
+//
+// Output mirrors cmd_handle<ZDO_SIMPLE_DESC_REQ>::format_response (in
+// commands_impl.h:769-799) so the host (zigbee-herdsman zboss adapter) decodes
+// it identically to a stack-parsed response.
+bool zb_ncp::try_intercept_simple_desc_rsp(const uint8_t* p, uint16_t len) {
+    if (!p || len < 5) return false;
+
+    const uint8_t  tsn         = p[0];
+    const uint8_t  status      = p[1];
+    uint16_t       nwk_addr    = 0;
+    memcpy(&nwk_addr, p + 2, 2);
+    const uint8_t  declared_sd = p[4];
+
+    using Resolver = request_cmd_resolver<ZDO_SIMPLE_DESC_REQ, zb_zdo_simple_desc_req_t>;
+    auto req = Resolver::resolve(tsn);
+    if (!req) {
+        // No pending request matches this tsn — either already handled by
+        // somebody else, or stale. Let the stack continue (caller will return
+        // false to ZBOSS) so its normal error path runs.
+        return false;
+    }
+
+    // Number of bytes we can actually read for the simple_desc body. Trust the
+    // smaller of (frame remainder) and (declared length) — the whole point of
+    // the intercept is to tolerate frame-length > declared. We also accept
+    // frame-length < declared (truncate to what we have) since some devices
+    // are buggy in the other direction too.
+    uint16_t avail = (len > 5) ? (len - 5) : 0;
+    if (declared_sd < avail) avail = declared_sd;
+
+    // Build the response wire format directly. Layout (per format_response):
+    //   cmd_t (4) | CATEGORY_ZDO (1) | status (1) | endpoint (1)
+    //   | profile_id (2) | device_id (2) | version (1) | in_count (1)
+    //   | out_count (1) | in_clusters (2*in_count) | out_clusters (2*out_count)
+    //   | nwk_addr (2)
+    // With in_count + out_count capped at 32, max body = 8 + 2*32 = 72 bytes
+    // plus 2 status header + 2 nwk + cmd_t = 80 bytes. Reserve 128 for slack.
+    uint8_t outdata[128];
+    auto out_cmd = reinterpret_cast<cmd_t*>(outdata);
+    *out_cmd       = req->cmd;
+    out_cmd->type  = RESPONSE;
+
+    uint8_t* out = reinterpret_cast<uint8_t*>(out_cmd + 1);
+    *out++ = STATUS_CATEGORY_ZDO;
+    *out++ = status;
+
+    if (status == 0 && avail >= 7) {
+        // Wire-format layout (ZCL Foundation 2.4.4.1.5 Simple_Desc_rsp body):
+        //   sd[0]            endpoint
+        //   sd[1..2]         profile_id  (little-endian)
+        //   sd[3..4]         device_id   (little-endian)
+        //   sd[5]            device_version (low 4 bits) | reserved (high 4 bits)
+        //   sd[6]            input_cluster_count          (= N)
+        //   sd[7 .. 7+2N-1]  input_clusters (each LE u16)
+        //   sd[7+2N]         output_cluster_count         (= M)
+        //   sd[8+2N .. ]     output_clusters (each LE u16)
+        // Total = 8 + 2*(N+M) bytes.  IMPORTANT: input_count and output_count
+        // are NOT adjacent on the wire — they're separated by the input list.
+        // ZBOSS' internal zb_af_simple_desc_*_t struct stores them adjacently
+        // with a single consolidated cluster_list, but that's after parsing.
+        const uint8_t* sd = p + 5;
+        const uint8_t  endpoint     = sd[0];
+        uint16_t       profile_id   = 0;  memcpy(&profile_id, sd + 1, 2);
+        uint16_t       device_id    = 0;  memcpy(&device_id,  sd + 3, 2);
+        const uint8_t  version_byte = sd[5] & 0x0F;  // low 4 bits, strip reserved
+        uint8_t        in_count     = sd[6];
+
+        // Bound input_count to remaining bytes.
+        uint16_t bytes_after_in_count = (avail > 7) ? (avail - 7) : 0;
+        if (uint16_t(in_count) * 2u > bytes_after_in_count) {
+            in_count = bytes_after_in_count / 2;
+        }
+
+        // out_count is at offset 7 + 2*in_count (after the input list).
+        const uint16_t out_count_off = 7u + 2u * uint16_t(in_count);
+        uint8_t  out_count = 0;
+        if (avail > out_count_off) {
+            out_count = sd[out_count_off];
+            uint16_t bytes_after_out_count = (avail > out_count_off + 1u)
+                                           ? (avail - out_count_off - 1u) : 0;
+            if (uint16_t(out_count) * 2u > bytes_after_out_count) {
+                out_count = bytes_after_out_count / 2;
+            }
+        }
+
+        // Cap at 32 each to fit the response buffer (format_response policy).
+        while ((in_count + out_count) > 32) {
+            if (in_count > out_count) --in_count; else --out_count;
+        }
+
+        *out++ = endpoint;
+        memcpy(out, &profile_id, 2); out += 2;
+        memcpy(out, &device_id,  2); out += 2;
+        *out++ = version_byte;
+        *out++ = in_count;
+        *out++ = out_count;
+        // Input cluster list starts at sd[7].
+        for (uint8_t i = 0; i < in_count; ++i) {
+            memcpy(out, sd + 7 + 2u * i, 2); out += 2;
+        }
+        // Output cluster list starts at sd[8 + 2*in_count] (one byte past the
+        // input list, accounting for the out_count byte itself).
+        for (uint8_t i = 0; i < out_count; ++i) {
+            memcpy(out, sd + 8 + 2u * uint16_t(in_count) + 2u * i, 2); out += 2;
+        }
+    }
+    // Tail: nwk_addr is present regardless of status (format_response writes it
+    // unconditionally; on error responses simple_desc body is omitted).
+    memcpy(out, &nwk_addr, 2); out += 2;
+
+    zb_ncp::send_cmd_data(outdata, out - outdata);
+
+    // Free the slot so the late ZBOSS TIMEOUT callback (which will arrive
+    // ~20 s from now after the stack's APS retries exhaust) finds no match
+    // and is silently dropped — see req_cb's "not found request for response"
+    // path in commands_helpers.h.
+    req->state = Resolver::request_t::S_NONE;
+
     return true;
 }

@@ -52,4 +52,23 @@ public:
 	static void on_rx_data(const void* data,size_t size);
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);
+
+	// Intercept hook for malformed ZDP Simple_Desc_rsp frames. The ZBOSS
+	// stack parser (libzboss_stack.zczr.a) does a strict
+	//     frame_length == declared_simple_desc_length
+	// check and drops responses with trailing extra bytes — see Espressif
+	// issue esp-zigbee-sdk#485, confirmed by @xieqinan 2024-11-19. Some Tuya
+	// devices (OUI prefix 0x70b3d5...) emit Simple_Desc_rsp with 2 trailing
+	// bytes, so ZBOSS never invokes the application callback for them; the
+	// host hits a 10 s timeout, ZBOSS later returns ZB_ZDP_STATUS_TIMEOUT
+	// after ~20 s of APS retries, interview fails permanently.
+	//
+	// This static method parses the response tolerantly (uses byte counts,
+	// ignores trailing junk past declared length), synthesises the wire
+	// payload exactly as cmd_handle<ZDO_SIMPLE_DESC_REQ>::format_response
+	// would have produced, and dispatches it via send_cmd_data. The matching
+	// pending request slot is marked S_NONE so the late TIMEOUT callback
+	// from ZBOSS finds no match and is silently dropped. Returns true if a
+	// pending request was matched and serviced.
+	static bool try_intercept_simple_desc_rsp(const uint8_t* payload, uint16_t len);
 };
