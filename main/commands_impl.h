@@ -1350,7 +1350,7 @@ struct zb_ncp::cmd_handle<ZDO_MGMT_BIND_REQ> : request_cmd_process< ZDO_MGMT_BIN
 
     static uint16_t format_response(uint8_t* outdata,const zb_zdo_mgmt_bind_resp_t* resp) {
         auto len = Base::format_response(outdata,resp);
-        auto outwrite = &outdata[len];
+        auto out = &outdata[len];
         auto src = reinterpret_cast<const zb_zdo_binding_table_record_t*>(resp+1);
         auto cnt = resp->binding_table_list_count;
         if (cnt > 64) {
@@ -1358,18 +1358,35 @@ struct zb_ncp::cmd_handle<ZDO_MGMT_BIND_REQ> : request_cmd_process< ZDO_MGMT_BIN
         	cnt = 64;
         	reinterpret_cast<zb_zdo_mgmt_bind_resp_t*>(outdata)->binding_table_list_count = cnt;
         }
+        // H8: write each record field-by-field so the wire layout no longer
+        // depends on zb_zdo_binding_table_record_t happening to match the
+        // ZDP wire format byte-for-byte (incl. dst_address union packing).
+        // Pre-fix code memcpy'd sizeof(record) then advanced `outwrite` by
+        // only the per-mode wire size, relying on the next iteration's memcpy
+        // to overwrite the leftover tail. Worked by accident for mode 1/3 and
+        // emitted garbage tail bytes after the last record for any other
+        // dst_addr_mode value.
         for (uint8_t i=0;i<cnt;++i) {
-            memcpy(outwrite,src,sizeof(zb_zdo_binding_table_record_t));
-            outwrite+=8+1+2+1;
+            memcpy(out, src->src_address, 8); out += 8;
+            *out++ = src->src_endp;
+            memcpy(out, &src->cluster_id, 2); out += 2;
+            *out++ = src->dst_addr_mode;
             if (src->dst_addr_mode == 0x01) {
-            	outwrite += 2; // short addr
+                memcpy(out, &src->dst_address.addr_short, 2); out += 2;
             } else if (src->dst_addr_mode == 0x03) {
-            	outwrite += 8 + 1; // long and ep
+                memcpy(out, src->dst_address.addr_long, 8); out += 8;
+                *out++ = src->dst_endp;
+            } else {
+                // Reserved/unknown mode — record ends at dst_addr_mode.
+                // zigbee-herdsman parses the rest of the buffer record-by-
+                // record and treats undefined dst as 'skip', so emitting no
+                // extra payload matches its expectations.
+                ESP_LOGW(TAG,"ZDO_MGMT_BIND_REQ: unknown dst_addr_mode %d",
+                         int(src->dst_addr_mode));
             }
             ++src;
-            
         }
-        return outwrite-outdata;
+        return out-outdata;
     }
 };
 
