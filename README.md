@@ -32,7 +32,7 @@ The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Te
 
 ## Recent Fixes & Improvements
 
-This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. As of 2026-05, the active upstream lives in this fork; the original `andryblack/esp-coordinator` README now points here.
+This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. As of 2026-05, the active upstream lives in this fork; the original `andryblack/esp-coordinator` repository is **archived and read-only** and its README points here. If you arrived via a search hit on one of the archived `andryblack` issues, see [`LEGACY_ANDRYBLACK_ISSUES.md`](LEGACY_ANDRYBLACK_ISSUES.md) for the current status of each report.
 
 ### v1.1.1+ — Reliability & Interop
 

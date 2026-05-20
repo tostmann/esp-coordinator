@@ -1,0 +1,141 @@
+# Status of Reports on the Archived `andryblack/esp-coordinator`
+
+`andryblack/esp-coordinator` was the original publication of this firmware. As
+of mid-2026 that repository is **archived and read-only** — every issue is
+locked and no new comments can be posted there. Its README points at this
+active fork, [`tostmann/esp-coordinator`](https://github.com/tostmann/esp-coordinator),
+which now ships releases, picks up issues, and tracks the backlog.
+
+This document mirrors the answers that would otherwise have been posted to
+each archived report, so users searching for those symptoms via Google or
+following an in-issue cross-reference can find the current status.
+
+If you have a fresh report of any of the symptoms below, please open a new
+issue on [tostmann/esp-coordinator/issues](https://github.com/tostmann/esp-coordinator/issues)
+— not on the archived repo.
+
+## Resolved in [`v1.1.22`](https://github.com/tostmann/esp-coordinator/releases/tag/v1.1.22)
+
+The web flasher at [install.busware.de/zboss](https://install.busware.de/zboss/)
+serves the corresponding factory binary. CLI users: `binaries/factory.bin`
+flashed at offset `0x0` with `esptool.py write_flash 0x0 binaries/factory.bin`.
+
+### [andryblack#7](https://github.com/andryblack/esp-coordinator/issues/7) — Tuya device interview fails
+
+Reporter saw `Failed to send SIMPLE_DESCRIPTOR_REQUEST` with a Tuya device
+(IEEE `0x70b3d52b6011344d`, OUI prefix `70b3d5…`). CC2652 was unaffected.
+
+**Cause:** the prebuilt ZBOSS stack does a strict length check on ZDP
+`Simple_Desc_rsp` and silently drops responses from those devices that carry
+trailing bytes — see [esp-zigbee-sdk#485](https://github.com/espressif/esp-zigbee-sdk/issues/485).
+Z2M sees the request go out, no response arrives, the timeout-wrapped wait
+surfaces as a send failure. CC2652 does the parse in its own stack and is
+unaffected.
+
+**Fix:** the firmware intercepts cluster `0x8004` indications, tolerantly
+re-parses them in userspace, and synthesises a clean response for the host
+(`try_intercept_simple_desc_rsp` in
+[`main/zb_ncp.cpp`](https://github.com/tostmann/esp-coordinator/blob/master/main/zb_ncp.cpp),
+commit `8a05931`). First known userspace workaround of #485, verified live on
+`_TZ3000_w0qqde0g` (TS011F).
+
+### [andryblack#11](https://github.com/andryblack/esp-coordinator/issues/11) — Missing NCP reset response after firmware startup
+
+The fix sketched in the original report is essentially what shipped:
+`app::start_int` now sends the two boot-time frames (ACK + NCP_RESET response
+with the `tsn=0xFF` sentinel) right after `transport::start()`. See
+[`main/app.cpp`](https://github.com/tostmann/esp-coordinator/blob/master/main/app.cpp).
+
+### [andryblack#15](https://github.com/andryblack/esp-coordinator/issues/15) — Need to set Manufacturer code for Lumi devices
+
+`status 31` from the stock firmware is `ESP_ERR_NOT_SUPPORTED` from the
+prebuilt ZBOSS lib, which is why a userspace handler was needed.
+
+The workaround has two halves and both are needed:
+
+- **Firmware:** v1.1.22 implements `ZDO_SET_NODE_DESC_MANUF_CODE (0x0216)`.
+- **Host:** the Z2M adapter has to actually call it, which is what
+  [`tostmann/zigbee2mqtt`](https://github.com/tostmann/zigbee2mqtt) does via
+  the `ghcr.io/tostmann/zigbee2mqtt-esp32:latest` Docker image. Setup steps in
+  [ZIGBEE2MQTT.md](ZIGBEE2MQTT.md).
+
+Paired Lumi devices interview cleanly once both sides are in place.
+
+### [andryblack#19](https://github.com/andryblack/esp-coordinator/issues/19) — Controller starts in reset mode after power failure, devices lost
+
+This is the cold-boot panID/channel race.
+
+**Cause:** `zboss_start_no_autostart()` only registers a deferred callback in
+the ZBOSS scheduler — it does not create a task on its own. Without the ZBOSS
+main loop running, that callback never fires, so the persisted network info
+(`panID`, `extendedPanID`, `channel`) is not loaded from NVRAM in time for
+Z2M's first `getNetworkInfo()` query. Z2M sees `joined: false`, decides the
+network does not match its `configuration.yaml`, and calls
+`reset(FactoryReset)` — wiping every paired device.
+
+**Fix:** drive the ZBOSS dispatch task at every boot from `app::start_int`
+after `transport::start()`. Live-verified on a cold-booted coordinator: Z2M's
+first `getNetworkInfo()` returns the persisted `panID`, `extPanID`, `channel`
+from NVRAM.
+
+Cross-references: [`andryblack#5`](https://github.com/andryblack/esp-coordinator/issues/5)
+(same root cause, also archived) and
+[`zigbee2mqtt#26152`](https://github.com/Koenkk/zigbee2mqtt/issues/26152).
+
+## Status / context reports
+
+### [andryblack#12](https://github.com/andryblack/esp-coordinator/issues/12) — Update ZBOSS / verify with latest Z2M
+
+Active upstream now lives at
+[`tostmann/esp-coordinator`](https://github.com/tostmann/esp-coordinator). It
+ships against current `espressif/esp-zigbee-sdk` and is verified with the
+current `zigbee-herdsman` `zboss` adapter on Z2M `latest` and `dev`. State as
+of 2026-05:
+
+- ESP-IDF v5.5.2, `esp-zigbee-lib` / `esp-zboss-lib` `^1.6.0`
+- 200-node coordinator, +20 dBm TX, NVRAM persistence across cold boot
+- Custom commands `0x0099 GET_NETWORK_BACKUP` / `0x009A RESTORE_NETWORK` for
+  full raw-NVRAM transfer (used by `ghcr.io/tostmann/zigbee2mqtt-esp32`)
+- Tuya `Simple_Desc_rsp` userspace intercept (see andryblack#7 above)
+
+### [andryblack#13](https://github.com/andryblack/esp-coordinator/issues/13) — diepeterpan's fork with stability fixes
+
+We audited [`diepeterpan/esp-coordinator`](https://github.com/diepeterpan/esp-coordinator)
+HEAD (`7ddf3b3`, Aug 2025) item-by-item against the current upstream. Every
+substantive fix is already present in v1.1.22, in some cases at a different
+placement: cold-boot race, `ext_pan_id` endian reversal in
+`GET_EXTENDED_PAN_ID`, `app_device_version = 1`, `GET_ZIGBEE_CHANNEL_MASK`
+implementation, console-logging silenced over the NCP transport
+(`CONFIG_LOG_DEFAULT_LEVEL_NONE=y`), ESP-IDF v5.5. The one divergence that
+matters in the other direction: `esp-zboss-lib` is `^1.6.0` (locked at 1.6.4)
+rather than pinned to 1.5.1 — the 1.5.1 pin was a workaround for a build
+issue that Espressif has since fixed.
+
+On top of those, v1.1.22 has audit fixes that diepeterpan's branch does not:
+the Tuya intercept, APSDE indication buffer raised to 512 bytes for OTA /
+multi-attribute reads, ZDO request-slot lifecycle hardening, 200-node
+`max_children` — see `git log` between `e77c32f..e4263ec`.
+
+## Still open in our working backlog
+
+### [andryblack#17](https://github.com/andryblack/esp-coordinator/issues/17) — Sensors don't auto-report (manual poll works)
+
+Tracked. Suspected sleepy-end-device / PIM handling — these devices don't
+poll the coordinator on a fast enough cadence to surface attribute updates as
+they happen. Not investigated in detail yet. Symptom matches Aqara/Mijia/Hue
+battery-powered sensors. If you can reproduce, please re-open on
+[tostmann/esp-coordinator/issues](https://github.com/tostmann/esp-coordinator/issues)
+with the device model + `_TZxxxx_…` or vendor manuf-code so we can categorise.
+
+## Not actionable / stale
+
+The following reports are either build / general help questions from 2024–
+early-2025 that the original author or community members answered in-thread,
+or out-of-scope topics (HA ZHA via zigpy-zboss rather than Z2M via
+zigbee-herdsman). They do not represent open work for us:
+
+- [andryblack#10](https://github.com/andryblack/esp-coordinator/issues/10) — compile question, 04/2025
+- [andryblack#9](https://github.com/andryblack/esp-coordinator/issues/9) — generic "Help" question, 03/2025
+- [andryblack#3](https://github.com/andryblack/esp-coordinator/issues/3) — documentation-tip from @Hedda
+- [andryblack#2](https://github.com/andryblack/esp-coordinator/issues/2) — Home Assistant ZHA / zigpy-zboss compatibility (different host-side stack — not in our scope)
+- [andryblack#1](https://github.com/andryblack/esp-coordinator/issues/1) — community offer to help with ZBOSS, 10/2024
