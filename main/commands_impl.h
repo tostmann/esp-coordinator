@@ -1648,11 +1648,16 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
 
     }
     static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
-    	if (len < sizeof(Arg)) {
+    	// Smallest acceptable frame: nep header (no dst_endpoint), zero data bytes.
+    	if (len < sizeof(apsde_data_req_arg_nep_t)) {
+    		ESP_LOGE(TAG,"APSDE_DATA_REQ: short frame %zu < %zu",
+    		         len, sizeof(apsde_data_req_arg_nep_t));
     		report_failed(cmd,GENERIC_INVALID_PARAMETER);
     		return;
     	}
     	if (len > sizeof(APSDE_DATA_REQ_max_arg_t)) {
+    		ESP_LOGE(TAG,"APSDE_DATA_REQ: oversize frame %zu > %zu",
+    		         len, sizeof(APSDE_DATA_REQ_max_arg_t));
     		report_failed(cmd,GENERIC_INVALID_PARAMETER);
     		return;
     	}
@@ -1661,6 +1666,37 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     		report_failed(cmd,GENERIC_INVALID_PARAMETER);
     		return;
     	}
+
+    	// M3: dataLength is host-supplied — must match the bytes actually
+    	// present in the frame after the param header. Without this check a
+    	// frame with paramLength=20, dataLength=0xFFFF, len=24 reached
+    	// zb_aps_send_user_payload(..., arg.data, 0xFFFF) and read 65 KiB
+    	// past the end of the 256-byte data[] array.
+    	const size_t hdr_size = (arg->paramLength == 21)
+    		? sizeof(apsde_data_req_arg_t)
+    		: sizeof(apsde_data_req_arg_nep_t);
+    	if (len < hdr_size) {
+    		ESP_LOGE(TAG,"APSDE_DATA_REQ: len %zu < hdr_size %zu (paramLength=%u)",
+    		         len, hdr_size, unsigned(arg->paramLength));
+    		report_failed(cmd,GENERIC_INVALID_PARAMETER);
+    		return;
+    	}
+    	const size_t actual_data_len = len - hdr_size;
+    	if (arg->dataLength != actual_data_len || arg->dataLength > MAX_APSDE_DATA_REQ_SIZE) {
+    		ESP_LOGE(TAG,"APSDE_DATA_REQ: dataLength %u != actual %zu (max %zu)",
+    		         unsigned(arg->dataLength), actual_data_len, size_t(MAX_APSDE_DATA_REQ_SIZE));
+    		report_failed(cmd,GENERIC_INVALID_PARAMETER);
+    		return;
+    	}
+    	// M4: start_request and aps_user_payload_callback both read arg.data[1]
+    	// as the ZCL frame TSN for response matching. Need >= 2 data bytes.
+    	if (arg->dataLength < 2) {
+    		ESP_LOGE(TAG,"APSDE_DATA_REQ: dataLength %u too small for ZCL header",
+    		         unsigned(arg->dataLength));
+    		report_failed(cmd,GENERIC_INVALID_PARAMETER);
+    		return;
+    	}
+
     	auto req = ResolveStrategy::start_resolve(cmd);
     	if (!req) {
     		report_failed(cmd,GENERIC_OUT_OF_RANGE);
