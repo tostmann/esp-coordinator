@@ -26,3 +26,16 @@
 !/binaries/factory.bin
 /main/*.orig
 /main/*.rej
+
+# Test scaffolding for rollout_check.sh — vendor-copied IDF example projects
+# and shared ZCL helpers used to spin up a transient end-device on a second
+# ESP32-C6 during integration testing. Not part of the firmware release;
+# developers reconstruct from upstream Espressif examples when needed.
+/HA_on_off_light/
+/HA_on_off_switch/
+/common/
+
+# v6 IDF env wrapper (parallel to idf_env.sh, host-local)
+/idf_env.v6.sh
+/.gemini/
+/.geminignore

@@ -5,6 +5,7 @@
 
 #include "commands_helpers.h"
 #include <esp_mac.h>
+#include "soc/usb_serial_jtag_reg.h"
 
 
 // default implementation
@@ -56,21 +57,80 @@ struct zb_ncp::cmd_handle<GET_MODULE_VERSION> : immediate_cmd_process<GET_MODULE
 //     response: [...commonResponse],
 // },
 
+// Reset work that must happen AFTER the matching-tsn response is on the wire.
+// z2m's herdsman ZBOSSDriver.reset() throws "{commandId:2} after 10000ms" if
+// the response doesn't come back within 10 s. Pre-fix, process_status_arg ran
+// zb_nvram_erase() + zb_bdb_reset_via_local_action() inline — both can block
+// for seconds (network LEAVE broadcast, flash erase) — before send_cmd_data
+// was even called, so the response was queued behind work that exceeded the
+// host's timeout window. The reset is now offloaded to a separate FreeRTOS
+// task with a short head-start, so process_status_arg returns immediately and
+// the response goes out via the event loop.
+struct ncp_reset_args_t {
+    uint8_t options;
+};
+static void ncp_reset_deferred_task(void* arg) {
+    auto* a = static_cast<ncp_reset_args_t*>(arg);
+    uint8_t options = a->options;
+    delete a;
+    // Yield long enough for the response to drain through the event loop
+    // and out the USB-Serial/JTAG ring. 300 ms is generous — actual TX of
+    // the ~18-byte response is sub-millisecond — but cheap insurance.
+    vTaskDelay(pdMS_TO_TICKS(300));
+    if (options == 1 || options == 2) {
+        ESP_LOGI(TAG,"erase nvram");
+        zb_nvram_erase();
+    }
+    if (options == 2) {
+        ESP_LOGI(TAG,"factory reset");
+        zb_bdb_reset_via_local_action(0);
+    }
+    // Force a USB disconnect before esp_restart so the host's CDC layer
+    // sees the device drop off the bus. ESP32-C6's USB-Serial-JTAG endpoint
+    // stays enumerated across esp_restart() (the ROM bootloader re-attaches
+    // the same descriptor instantly), the host never raises a port-close
+    // event, and zigbee-herdsman's ZBOSSUart.inReset flag (uart.js:33) is
+    // never cleared from onPortClose (uart.js:176) — so every inbound frame
+    // gets silently dropped in onPackage (uart.js:183).
+    //
+    // Disabling DP_PULLUP + USB_PAD_ENABLE collapses the D+ line to 0,
+    // which the host recognises as a USB disconnect within ~10 ms.  The
+    // 800 ms hold is well above any USB hub debounce and beyond what
+    // node-serialport's hot-plug detector needs.  Same pattern Espressif
+    // uses in esp-iot-solution/.../boot_hooks.c to hide the USB identity.
+    // The chip's reset clears the override + restores defaults (PAD_ENABLE
+    // / DP_PULLUP), and the host re-enumerates the device.
+    //
+    // NOTE: this only helps herdsman get out of inReset.  It does NOT
+    // resolve the matching-tsn problem in execCommand — z2m sends
+    // NCP_RESET with tsn=X, but our post-reboot boot-ready frame uses
+    // the unsolicited-boot sentinel tsn=0xFF.  herdsman's waitressValidator
+    // (driver.js:259) requires matcher.tsn === payload.tsn, so the boot
+    // frame doesn't satisfy the pending wait.  Real close needs a patch on
+    // the tostmann/zigbee2mqtt-esp32 herdsman fork to either accept tsn=0xFF
+    // as a wildcard match for NCP_RESET or to resolve pending NCP_RESET
+    // promises on inReset clear.  Filed as a separate open issue.
+    ESP_LOGI(TAG,"USB detach");
+    SET_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PAD_PULL_OVERRIDE);
+    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_DP_PULLUP);
+    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+    vTaskDelay(pdMS_TO_TICKS(800));
+    ESP_LOGI(TAG,"restart");
+    esp_restart();
+}
+
 template <>
 struct zb_ncp::cmd_handle<NCP_RESET> : immediate_cmd_process<NCP_RESET>,
 		general_status_arg<NCP_RESET,uint8_t> {
 	static void process_status_arg(ncp_generic_status_t& status, uint8_t options) {
-    	if (options == 1 || options == 2) {
-            ESP_LOGI(TAG,"erase nvram");
-            zb_nvram_erase();
-        } 
-        if (options == 2) {
-            ESP_LOGI(TAG,"factory reset");
-            zb_bdb_reset_via_local_action(0);
+        auto* args = new ncp_reset_args_t{options};
+        BaseType_t ok = xTaskCreate(ncp_reset_deferred_task,
+                                    "rst_dly", 4096, args, 5, NULL);
+        if (ok != pdTRUE) {
+            delete args;
+            status = GENERIC_NO_RESOURCES;
+            return;
         }
-        ESP_LOGI(TAG,"restart");
-        app::ctx_t ctx = {app::EVENT_RESET, 0};
-        app::send_event(ctx);
     }
 };
 

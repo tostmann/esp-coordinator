@@ -4,6 +4,8 @@
 #include "zb_ncp.h"
 #include <nvs_flash.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char* TAG = "APP";
 
@@ -54,16 +56,31 @@ esp_err_t app::process_event(const ctx_t& ctx) {
                 ret = protocol::on_rx(m_buffer, ctx.size);
             }
             break;
-        case EVENT_RESET:
-            // Give the just-sent NCP_RESET response time to drain the
-            // USB-Serial/JTAG TX ring before we yank the rug. The OK ACK is
-            // sent synchronously from the request handler before EVENT_RESET
-            // is dequeued, but usb_serial_jtag_write_bytes returns once the
-            // bytes are queued, not transmitted. Without this delay the host
-            // race-loses the ACK on busy USB hubs.
+        case EVENT_RESET: {
+            // The NCP_RESET request handler posts EVENT_RESET from
+            // process_status_arg BEFORE immediate_cmd_process::process gets
+            // to call send_cmd_data — so the actual NCP_RESET response is
+            // queued in m_queue as EVENT_INPUT BEHIND this EVENT_RESET.
+            //
+            // Drain remaining queue entries first so any pending response
+            // (most importantly the OK reply to the very NCP_RESET request
+            // that triggered this reset) goes out via usb_serial_jtag_write_bytes
+            // before we reboot. Without the drain z2m's reset() promise
+            // times out (no matching-tsn response) and z2m exits with
+            // "Failed to start zigbee-herdsman".
+            //
+            // Then a short delay lets the USB-Serial-JTAG controller actually
+            // shift the queued bytes out onto the wire before esp_restart()
+            // yanks the rug — usb_serial_jtag_write_bytes returns once the
+            // bytes are accepted into the driver's TX ring, not after they
+            // are transmitted.
+            ctx_t pending;
+            while (xQueueReceive(m_queue, &pending, 0) == pdTRUE) {
+                process_event(pending);
+            }
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
-            break;
+        } break;
         default:
             break;
     }
@@ -100,6 +117,18 @@ esp_err_t app::start_int() {
     // andryblack/esp-coordinator#11).
     uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
     transport::send(raw_data, sizeof(raw_data));
+
+    // Cold-boot panID race: start the ZBOSS dispatch task here, after the
+    // transport polling task is up and the event loop is about to drain
+    // m_queue. Triggers zboss_main_loop -> SKIP_STARTUP -> continue_zboss,
+    // which sends the synthetic NCP_RESET response and kicks off
+    // NETWORK_STEERING so the persisted NVRAM-stored network is actually
+    // active by the time z2m's first GET_JOINED query arrives. Without this
+    // the task only spins up lazily when the host issues NWK_FORMATION /
+    // NWK_START_WITHOUT_FORMATION — but z2m doesn't issue those at startup
+    // (it queries first), and on stale defaults it formNetwork()s and wipes
+    // every paired device.  See andryblack/esp-coordinator#5/#19, z2m #26152.
+    zb_ncp::start_zigbee_stack();
 
     // The synthetic NCP_RESET *response* (cmd=0x0002, tsn=0xFF, status=OK)
     // used to be sent here, but doing so before ZBOSS finished loading its

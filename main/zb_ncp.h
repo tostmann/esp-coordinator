@@ -40,7 +40,6 @@ private:
 	uint32_t m_channels_mask;
 	static void continue_zboss(uint8_t );
 	static void set_channel_mask(uint32_t mask);
-	static bool start_zigbee_stack();
 	static void ncp_zb_task(void* arg);
 
 private:
@@ -49,6 +48,15 @@ private:
 	esp_err_t init_int();
 public:
 	static esp_err_t init() { return instance().init_int(); }
+	// Boot-time entry: start the ZBOSS dispatch task so the persisted NVRAM
+	// dataset is loaded and SKIP_STARTUP fires (which then runs continue_zboss
+	// → boot-ready NCP_RESET response + bdb_start_top_level_commissioning).
+	// Without this the task is only started lazily from NWK_FORMATION /
+	// NWK_START_WITHOUT_FORMATION command handlers — but z2m never sends those
+	// at startup, it queries GET_JOINED / GET_PAN_ID first and on the stale
+	// 0xFFFF/0xFF defaults decides to formNetwork() and wipes paired devices.
+	// See andryblack/esp-coordinator#5 / #19, z2m #26152. Idempotent.
+	static bool start_zigbee_stack();
 	static void on_rx_data(const void* data,size_t size);
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);

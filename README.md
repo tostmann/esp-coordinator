@@ -30,13 +30,21 @@ The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Te
    The commercial, highly-certified ZBOSS stack provides an extremely robust alternative to the often complex and legacy-burdened EZSP protocol.
 
 
-## Recent Fixes & Improvements (v1.1.0)
+## Recent Fixes & Improvements
 
-This project is an actively maintained, heavily optimized evolution of the original esp-coordinator.
+This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. As of 2026-05, the active upstream lives in this fork; the original `andryblack/esp-coordinator` README now points here.
 
-* **Native NVRAM Backup & Restore:** Complete firmware-side implementation of custom NCP Commands `0x0099` and `0x009A`, supporting chunked Z2M backups.
+### v1.1.1+ — Reliability & Interop
+
+* **Cold-boot panID/channel race FIXED ([#5](https://github.com/andryblack/esp-coordinator/issues/5) / [#19](https://github.com/andryblack/esp-coordinator/issues/19) / [z2m#26152](https://github.com/Koenkk/zigbee2mqtt/issues/26152)):** The ZBOSS dispatch task is now started at boot from `app::start_int`, not lazily from `NWK_FORMATION` / `NWK_START_WITHOUT_FORMATION`. Without this, z2m's first `GET_JOINED` / `GET_PAN_ID` queries returned the uninitialised 0xFFFF / 0xFF defaults, z2m saw a "different" network than its configured options and called `formNetwork()` — silently wiping every paired device. Verified live: persisted `panID`, `extendedPanID`, and `channel` come back correctly on every cold boot.
+* **NCP_RESET deferred task + USB phy detach:** Long-running parts of factory-reset (`zb_nvram_erase`, `zb_bdb_reset_via_local_action`) moved off the request-handling task so the matching-tsn response goes out on the wire immediately. Before `esp_restart()`, the firmware now forcibly disables `USB_SERIAL_JTAG_CONF0_REG`'s `DP_PULLUP` + `USB_PAD_ENABLE` for 800 ms — the host CDC layer sees a real disconnect, which is what herdsman's `onPortClose` needs to release its `inReset` flag. (For end-to-end factory-reset, the host also needs the matching change in `tostmann/zigbee2mqtt` `scripts/patch_zboss.js`; see [ZIGBEE2MQTT.md](ZIGBEE2MQTT.md).)
+* **Tuya Simple_Desc_rsp intercept ([esp-zigbee-sdk#485](https://github.com/espressif/esp-zigbee-sdk/issues/485)):** The prebuilt ZBOSS stack does a strict frame-length check on ZDP Simple_Desc_rsp and silently drops responses with trailing bytes, breaking interview for some Tuya devices (OUI prefix `0x70b3d5...`, e.g. TS011F). The firmware now intercepts cluster 0x8004 indications, tolerantly re-parses them, and synthesises a clean response to the host. First known userspace workaround of #485. Live-verified on `_TZ3000_w0qqde0g`.
+* **Audit pass:** 17 fixes across critical/high/medium severity — APSDE bound checks, ZDO request slot lifecycle, RESTORE_NETWORK chunked-transfer hardening, real firmware-version reporting via `GET_MODULE_VERSION`, etc. See `git log`.
+
+### v1.1.0 — Foundational
+
+* **Native NVRAM Backup & Restore:** Complete firmware-side implementation of custom NCP Commands `0x0099` and `0x009A`, supporting chunked Z2M backups (40 KB image = nvs + zb_storage partitions).
 * **NVRAM Persistence Fix:** Coordinator accurately resumes its network from NVRAM on boot, maintaining pairings and frame counters across restarts.
-* **Synchronous NCP Reset Fix:** Reset acknowledgments (ACKs) are accurately sent back to the host *before* reboot, preventing Zigbee2MQTT handshake timeouts.
 * **Manufacturer Code Workaround:** `ZDO_SET_NODE_DESC_MANUF_CODE` implementation allows Z2M to emulate the manufacturer code dynamically.
 * **Network Scaling:** Tables and memory dynamically optimized for 200 nodes.
 * **Dynamic TX Power:** Supports dynamic adjustment of the transmission power up to 20 dBm.
@@ -75,14 +83,14 @@ You can flash the firmware directly from your browser using our Web Serial Flash
 *(Supported Browsers: Chrome, Edge, Opera)*
 
 ### 2. Manual CLI Flashing
-Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, and the app.
+Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, OTA data, and the app.
 
 ```bash
-esptool.py -p /dev/ttyACM0 --chip esp32c6 write_flash 0x0 binaries/esp-coordinator-v1.1.0-esp32c6-factory.bin
+esptool.py -p /dev/ttyACM0 --chip esp32c6 write_flash 0x0 binaries/factory.bin
 ```
 
 ### 3. Build from Source
-You can compile the firmware yourself using the standard Espressif IoT Development Framework (ESP-IDF v5.5):
+You can compile the firmware yourself using the standard Espressif IoT Development Framework (ESP-IDF v5.5+):
 
 ```bash
 idf.py build

@@ -1,0 +1,90 @@
+From: Dirk Tostmann <tostmann@gmail.com>
+Subject: [PATCH] zboss adapter: stop dropping inbound frames while in reset
+
+ZBOSSDriver.reset() sets port.inReset=true before awaiting the NCP_RESET
+response, and onPackage unconditionally drops every inbound frame while
+that flag is set. The flag is only cleared in onPortClose -> 3s wait ->
+reopen. On ESP32-C6 USB-Serial-JTAG the ROM bootloader re-attaches the
+same USB CDC descriptor across esp_restart() instantly, so the host
+never raises a port-close event -> inReset never clears -> the original
+NCP_RESET response AND the post-reboot boot-ready frame both get
+silently dropped -> the waiter eventually fires the 10000ms timeout in
+execCommand and reset() throws. End-user: z2m exits with "Failed to
+start zigbee-herdsman" on every channel/panID mismatch.
+
+Even with a firmware-side USB phy detach
+(USB_SERIAL_JTAG_CONF0_REG: clear DP_PULLUP + USB_PAD_ENABLE for 800 ms,
+which IS implemented in tostmann/esp-coordinator
+main/commands_impl.h ncp_reset_deferred_task) and herdsman now seeing
+the disconnect via onPortClose, the original tsn-matching response was
+already lost during the brief inReset window before the detach, and the
+post-reboot boot-ready frame can arrive inside the 3s reopen wait while
+the port is closed.
+
+The fix is to stop dropping frames in onPackage. CRC8/CRC16 already
+reject anything that isn't a well-formed ZBOSS NCP frame, and the
+waiter for NCP_RESET responses is already created with tsn=undefined
+(driver.js:235) so any matching commandId=2 frame -- the original
+response OR the post-reboot boot-ready -- satisfies the wait. The
+inReset flag itself remains in place (used by isInitialized() at
+driver.js:225); only the silent-drop behaviour is removed.
+
+See patches/herdsman-ncp-reset-fix.md for the long-form rationale,
+risk assessment, and test plan.
+
+Signed-off-by: Dirk Tostmann <tostmann@gmail.com>
+---
+ dist/adapter/zboss/uart.js | 12 +++++++++++-
+ src/adapter/zboss/uart.ts  | 13 ++++++++++++-
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/dist/adapter/zboss/uart.js b/dist/adapter/zboss/uart.js
+--- a/dist/adapter/zboss/uart.js
++++ b/dist/adapter/zboss/uart.js
+@@ -180,8 +180,18 @@ class ZBOSSUart extends node_events_1.default {
+         logger_1.logger.info(`Port error: ${error}`, NS);
+     }
+     async onPackage(data) {
+-        if (this.inReset)
+-            return;
++        // Intentionally do NOT drop frames while inReset.
++        //
++        // ESP32-C6 USB-Serial-JTAG re-attaches the same USB CDC descriptor
++        // across esp_restart() so the host doesn't necessarily see a
++        // port-close to trigger onPortClose() and clear inReset. Even when
++        // the firmware forces a USB phy detach, the post-reboot boot-ready
++        // frame can arrive *before* the 3s reopen wait completes — or the
++        // tsn-matching NCP_RESET response can arrive while inReset is still
++        // set. Dropping these turns reset() into an unconditional 10s timeout.
++        //
++        // The CRC checks below already reject garbage (ROM banner, partial
++        // frames, electrical noise).
+         const len = data.readUInt16LE(0);
+         const pType = data.readUInt8(2);
+         const pFlags = data.readUInt8(3);
+
+diff --git a/src/adapter/zboss/uart.ts b/src/adapter/zboss/uart.ts
+--- a/src/adapter/zboss/uart.ts
++++ b/src/adapter/zboss/uart.ts
+@@ -178,8 +178,19 @@ export class ZBOSSUart extends EventEmitter {
+     }
+
+     private async onPackage(data: Buffer): Promise<void> {
+-        if (this.inReset) return;
++        // Intentionally do NOT drop frames while inReset.
++        //
++        // ESP32-C6 USB-Serial-JTAG re-attaches the same USB CDC descriptor
++        // across esp_restart() so the host doesn't necessarily see a
++        // port-close to trigger onPortClose() and clear inReset. Even when
++        // the firmware forces a USB phy detach, the post-reboot boot-ready
++        // frame can arrive *before* the 3s reopen wait completes — or the
++        // tsn-matching NCP_RESET response can arrive while inReset is still
++        // set. Dropping these turns reset() into an unconditional 10s timeout.
++        //
++        // The CRC checks below already reject garbage (ROM banner, partial
++        // frames, electrical noise).
+
+         const len = data.readUInt16LE(0);
+         const pType = data.readUInt8(2);
+--
+2.39.5
