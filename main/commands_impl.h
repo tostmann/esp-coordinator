@@ -1690,96 +1690,199 @@ struct zb_ncp::cmd_handle<ZDO_SET_NODE_DESC_MANUF_CODE> : immediate_cmd_process<
 
 #include "esp_partition.h"
 
+// Cached partition handles for the network-backup commands. Looked up once and
+// reused for every chunk — esp_partition_find_first is not free.
+static inline const esp_partition_t* backup_nvs_partition() {
+    static const esp_partition_t* p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+    return p;
+}
+static inline const esp_partition_t* backup_zb_partition() {
+    static const esp_partition_t* p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
+    return p;
+}
+
+// Session state for chunked RESTORE_NETWORK. The handler runs on the single app
+// event-loop task, so no synchronisation is needed. `active` becomes true on the
+// offset==0 chunk and false again when the final chunk completes or a fresh
+// session starts; `next_offset` enforces monotonic chunk arrival (C2 in audit).
+struct restore_session_t {
+    uint32_t next_offset;
+    uint32_t total_size;
+    bool     active;
+};
+static restore_session_t s_restore_session = { 0, 0, false };
+
 template <>
 struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP> {
-    static constexpr size_t resp_buffer_size = 200;
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 128;
     static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        // Unaligned-safe read of offset (RV32 fault risk if cast as uint32_t*).
         uint32_t offset = 0;
         if (inlen >= 4) {
-            offset = *(uint32_t*)inbuffer;
+            memcpy(&offset, inbuffer, 4);
         }
-        
-        uint32_t total_size = 0xA000;
-        uint32_t len = 128;
-        if (offset + len > total_size) {
-            len = (total_size > offset) ? (total_size - offset) : 0;
-        }
-        
+
         auto full_res = reinterpret_cast<generic_response_t*>(outdata);
         full_res->category = STATUS_CATEGORY_GENERIC;
         full_res->status = GENERIC_OK;
-        
         uint8_t* payload = outdata + sizeof(generic_response_t);
-        memcpy(payload, &total_size, 4);
-        memcpy(payload + 4, &len, 4);
-        
+
+        const auto nvs_part = backup_nvs_partition();
+        const auto zb_part  = backup_zb_partition();
+        if (!nvs_part || !zb_part) {
+            ESP_LOGE(TAG, "GET_NETWORK_BACKUP: partitions missing (nvs=%p zb=%p)", nvs_part, zb_part);
+            full_res->status = GENERIC_OPERATION_FAILED;
+            const uint32_t zero = 0;
+            memcpy(payload,     &zero, 4);
+            memcpy(payload + 4, &zero, 4);
+            return sizeof(generic_response_t) + 8;
+        }
+
+        // Total size is derived from the actual partition layout, not a
+        // hardcoded constant — re-flashing with a different partition table
+        // no longer silently truncates / over-reads (C3).
+        const uint32_t total_size = nvs_part->size + zb_part->size;
+
+        uint32_t len = 128;
+        if (offset >= total_size) {
+            len = 0;
+        } else if (offset + len > total_size) {
+            len = total_size - offset;
+        }
+
+        memcpy(payload,     &total_size, 4);
+        memcpy(payload + 4, &len,        4);
+
         if (len > 0) {
-            if (offset < 0x6000) {
+            if (offset < nvs_part->size) {
                 uint32_t read_len = len;
-                if (offset + read_len > 0x6000) read_len = 0x6000 - offset;
-                const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
-                if (nvs_part) esp_partition_read(nvs_part, offset, payload + 8, read_len);
-                
+                if (offset + read_len > nvs_part->size) {
+                    read_len = nvs_part->size - offset;
+                }
+                esp_partition_read(nvs_part, offset, payload + 8, read_len);
                 if (read_len < len) {
-                    const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
-                    if (zb_part) esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
+                    esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
                 }
             } else {
-                const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
-                if (zb_part) esp_partition_read(zb_part, offset - 0x6000, payload + 8, len);
+                esp_partition_read(zb_part, offset - nvs_part->size, payload + 8, len);
             }
         }
-        
+
         return sizeof(generic_response_t) + 8 + len;
     }
 };
 
 template <>
 struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK> {
-    static constexpr size_t resp_buffer_size = 0;
+    // Bug pre-fix: resp_buffer_size was 0 but process_immediate writes a
+    // 2-byte generic_response_t — 2-byte stack overflow in the wrapper's
+    // outdata buffer. Now sized correctly.
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t);
+
+    static size_t reply(uint8_t* outdata, ncp_generic_status_t status) {
+        auto r = reinterpret_cast<generic_response_t*>(outdata);
+        r->category = STATUS_CATEGORY_GENERIC;
+        r->status   = status;
+        return sizeof(generic_response_t);
+    }
+
     static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
-        if (inlen >= 8) {
-            const uint8_t* in_ptr = (const uint8_t*)inbuffer;
-            uint32_t offset = *(uint32_t*)in_ptr;
-            uint32_t total_size = *(uint32_t*)(in_ptr + 4);
-            uint32_t chunk_length = inlen - 8;
-            
-            if (offset == 0) {
-                extern esp_err_t nvs_flash_deinit(void);
-                nvs_flash_deinit();
-                
-                const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
-                const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
-                if (nvs_part) esp_partition_erase_range(nvs_part, 0, 0x6000);
-                if (zb_part) esp_partition_erase_range(zb_part, 0, 0x4000);
+        if (inlen < 8) {
+            ESP_LOGE(TAG, "RESTORE_NETWORK: short frame %d", int(inlen));
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+
+        const uint8_t* in_ptr = static_cast<const uint8_t*>(inbuffer);
+        uint32_t offset      = 0;
+        uint32_t total_size  = 0;
+        memcpy(&offset,     in_ptr,     4);  // unaligned-safe
+        memcpy(&total_size, in_ptr + 4, 4);
+        const uint32_t chunk_length = inlen - 8;
+
+        const auto nvs_part = backup_nvs_partition();
+        const auto zb_part  = backup_zb_partition();
+        if (!nvs_part || !zb_part) {
+            ESP_LOGE(TAG, "RESTORE_NETWORK: partitions missing (nvs=%p zb=%p)", nvs_part, zb_part);
+            return reply(outdata, GENERIC_OPERATION_FAILED);
+        }
+        const uint32_t capacity = nvs_part->size + zb_part->size;
+
+        // C3: declared total_size from host must match what we can store.
+        if (total_size != capacity) {
+            ESP_LOGE(TAG, "RESTORE_NETWORK: total_size %lu != capacity %lu",
+                     (unsigned long)total_size, (unsigned long)capacity);
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+        // C3: chunk must stay strictly inside the image.
+        if (offset > capacity || chunk_length > capacity - offset) {
+            ESP_LOGE(TAG, "RESTORE_NETWORK: chunk OOB offset=%lu len=%lu cap=%lu",
+                     (unsigned long)offset, (unsigned long)chunk_length, (unsigned long)capacity);
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+
+        // C2: session ordering. offset==0 opens (or restarts) a session and
+        // performs the destructive erase exactly once per stream. Non-zero
+        // offsets must arrive in monotonic order *during* an active session —
+        // this also serves as a partial C1 mitigation: a stray RESTORE frame
+        // with offset!=0 from a buggy or hostile peer is rejected without
+        // touching flash, instead of e.g. silently writing into nvs.
+        if (offset == 0) {
+            if (s_restore_session.active) {
+                ESP_LOGW(TAG, "RESTORE_NETWORK: prior session at %lu/%lu abandoned, restarting",
+                         (unsigned long)s_restore_session.next_offset,
+                         (unsigned long)s_restore_session.total_size);
             }
-            
-            if (chunk_length > 0) {
-                if (offset < 0x6000) {
-                    uint32_t write_len = chunk_length;
-                    if (offset + write_len > 0x6000) write_len = 0x6000 - offset;
-                    const esp_partition_t* nvs_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
-                    if (nvs_part) esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
-                    
-                    if (write_len < chunk_length) {
-                        const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
-                        if (zb_part) esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
-                    }
-                } else {
-                    const esp_partition_t* zb_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
-                    if (zb_part) esp_partition_write(zb_part, offset - 0x6000, in_ptr + 8, chunk_length);
-                }
+            ESP_LOGI(TAG, "RESTORE_NETWORK: begin, total %lu bytes", (unsigned long)total_size);
+            extern esp_err_t nvs_flash_deinit(void);
+            nvs_flash_deinit();
+            esp_partition_erase_range(nvs_part, 0, nvs_part->size);
+            esp_partition_erase_range(zb_part,  0, zb_part->size);
+            s_restore_session.active      = true;
+            s_restore_session.total_size  = total_size;
+            s_restore_session.next_offset = 0;
+        } else {
+            if (!s_restore_session.active) {
+                ESP_LOGE(TAG, "RESTORE_NETWORK: chunk at offset %lu without active session",
+                         (unsigned long)offset);
+                return reply(outdata, GENERIC_INVALID_STATE);
             }
-            
-            if (offset + chunk_length >= total_size) {
-                xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); }, "reboot", 2048, NULL, 5, NULL);
+            if (offset != s_restore_session.next_offset) {
+                ESP_LOGE(TAG, "RESTORE_NETWORK: out-of-order chunk: got %lu, expected %lu",
+                         (unsigned long)offset, (unsigned long)s_restore_session.next_offset);
+                return reply(outdata, GENERIC_INVALID_PARAMETER);
             }
         }
-        
-        auto full_res = reinterpret_cast<generic_response_t*>(outdata);
-        full_res->category = STATUS_CATEGORY_GENERIC;
-        full_res->status = GENERIC_OK;
-        return sizeof(generic_response_t);
+
+        // Split the chunk across the nvs/zb_storage boundary if it straddles.
+        if (chunk_length > 0) {
+            if (offset < nvs_part->size) {
+                uint32_t write_len = chunk_length;
+                if (offset + write_len > nvs_part->size) {
+                    write_len = nvs_part->size - offset;
+                }
+                esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
+                if (write_len < chunk_length) {
+                    esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
+                }
+            } else {
+                esp_partition_write(zb_part, offset - nvs_part->size, in_ptr + 8, chunk_length);
+            }
+        }
+
+        s_restore_session.next_offset = offset + chunk_length;
+
+        if (s_restore_session.next_offset >= s_restore_session.total_size) {
+            ESP_LOGI(TAG, "RESTORE_NETWORK: complete, rebooting in 1s");
+            // Mark inactive so a duplicate final chunk (e.g. host retry) does
+            // not spawn a second reboot task.
+            s_restore_session.active = false;
+            xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
+                        "reboot", 2048, NULL, 5, NULL);
+        }
+
+        return reply(outdata, GENERIC_OK);
     }
 };
 
