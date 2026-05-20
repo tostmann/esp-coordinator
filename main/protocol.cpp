@@ -119,7 +119,7 @@ void protocol::on_rx_packet(const ncp_header_t& hdr,const void* data,size_t data
 		// ack received
 	} 
 	if (hdr.is_nack) {
-		ESP_LOGE(TAG,"NACK received, retransmitt not supported");
+		ESP_LOGE(TAG,"NACK received, retransmit not supported");
 		return;
 	}
 	if (!data)

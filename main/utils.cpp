@@ -70,7 +70,7 @@ namespace utils {
 	    switch(status) {
 
 	        case ZB_ZDP_STATUS_SUCCESS:				return "success";
-	        case ZB_ZDP_STATUS_INV_REQUESTTYPE:		return "ivalid request type";
+	        case ZB_ZDP_STATUS_INV_REQUESTTYPE:		return "invalid request type";
 	        case ZB_ZDP_STATUS_DEVICE_NOT_FOUND:	return "device not found";
 		    case ZB_ZDP_STATUS_INVALID_EP:			return "invalid ep";
 			case ZB_ZDP_STATUS_NOT_ACTIVE:			return "not active";
@@ -83,7 +83,7 @@ namespace utils {
 	        case ZB_ZDP_STATUS_NOT_PERMITTED:		return "not permitted";
 	        case ZB_ZDP_STATUS_TABLE_FULL:			return "table full";
 	    }
-	    return "unknow";
+	    return "unknown";
 	}
 
 	const char* get_nlme_status_str(uint8_t status) {

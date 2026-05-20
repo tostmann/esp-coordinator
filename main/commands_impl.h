@@ -12,7 +12,7 @@ template <command_id_t CmdId>
 struct zb_ncp::cmd_handle : immediate_cmd_process<CmdId> {
 	static constexpr size_t resp_buffer_size = 2;
 	static size_t process_immediate(const void *inbuffer, size_t inlen,uint8_t* outdata,size_t outdata_size) {
-		ESP_LOGE(TAG,"Unumplemented cmd: %04x",CmdId);
+		ESP_LOGE(TAG,"Unimplemented cmd: %04x",CmdId);
 		outdata[0] = STATUS_CATEGORY_GENERIC;
 		outdata[1] = GENERIC_NOT_IMPLEMENTED;
         return 2;
