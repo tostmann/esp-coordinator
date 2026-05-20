@@ -457,6 +457,15 @@ template <>
 struct zb_ncp::cmd_handle<SET_EXTENDED_PAN_ID> : immediate_cmd_process<SET_EXTENDED_PAN_ID>,
 		general_status_arg<SET_EXTENDED_PAN_ID,zb_ext_pan_id_t> {
 	static void process_status_arg(ncp_generic_status_t& status, const zb_ext_pan_id_t& arg) {
+		// TODO(M2): asymmetric with GET_EXTENDED_PAN_ID — GET reverses 8 bytes
+		// before sending but SET takes them as-is. zigbee-herdsman writes
+		// EXTENDED_PAN_ID as raw 8 bytes (frame.js:18 writeBuffer(value,8))
+		// in both directions, so a host that round-trips SET->GET sees the
+		// ext PAN ID byte-flipped relative to what it sent. Z2M currently
+		// has SET_EXTENDED_PAN_ID commented out (driver.js:201) so the
+		// regression is latent. Decide on a canonical wire byte order
+		// (most likely: drop the reversal in GET to make both raw) once a
+		// hardware round-trip test is possible.
 		zb_set_extended_pan_id(arg);
     }
 };
