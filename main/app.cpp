@@ -103,8 +103,12 @@ esp_err_t app::start_int() {
         }
 
         if (process_event(ctx) != ESP_OK) {
+            // Per-event failure must not tear down the NCP link — a transient
+            // stream-buffer or oversize-packet error on one ctx is independent
+            // of the next. Pre-fix this loop would `break`, returning to
+            // app_main which then ended the main task and left the host with
+            // an open serial port that never answered again.
             ESP_LOGE(TAG, "Process event fail");
-            break;
         }
     }
 	return ESP_OK;

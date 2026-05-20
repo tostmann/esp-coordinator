@@ -26,7 +26,9 @@ private:
 	static constexpr size_t EVENT_QUEUE_LEN = 60;
 	static constexpr size_t TIMEOUT_MS  = 10;
 
-	static constexpr size_t BUFFER_SIZE = 256 * 2;
+	// Must be >= transport::BUF_SIZE (currently 1024) — undersizing causes silent
+	// drops of bursts >BUFFER_SIZE in process_event (ESP_ERR_NO_MEM path).
+	static constexpr size_t BUFFER_SIZE = 1024;
 
 	QueueHandle_t m_queue; 
 	uint8_t m_buffer[BUFFER_SIZE];
