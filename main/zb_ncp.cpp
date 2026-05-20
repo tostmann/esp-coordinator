@@ -403,16 +403,3 @@ extern "C" bool zb_zcl_green_power_cluster_handler(zb_uint8_t param) {
     ESP_LOGW(TAG,"Green power cluster handle");
     return true;
 }
-
-
-extern "C" void test_zboss_nvs();
-
-void call_nvs_test() {
-    test_zboss_nvs();
-}
-
-extern "C" uint8_t* secur_nwk_key_by_seq(uint8_t seq);
-
-void test_secur() {
-    uint8_t* key = secur_nwk_key_by_seq(0);
-}
