@@ -54,9 +54,22 @@ This project is an actively maintained, heavily optimized evolution of the origi
 
 ## Zigbee2MQTT Integration & Hardware Migration
 
-While this coordinator works perfectly with the standard Zigbee2MQTT release, **we highly recommend using our customized Docker image** (`ghcr.io/tostmann/zigbee2mqtt-esp32:latest`). 
+While this coordinator works perfectly with the standard Zigbee2MQTT release, **we highly recommend using our customized Docker image** (`ghcr.io/tostmann/zigbee2mqtt-esp32:latest`).
 
 Our custom image unlocks **Native NVRAM Snapshots**, allowing Zigbee2MQTT to automatically stream the ESP32's complete NVRAM over the serial protocol. This means if your hardware breaks, you can just plug in a new ESP32 and Z2M will automatically transfer your latest network state (including frame counters) to the new chip without having to re-pair any devices.
+
+### Which Zigbee2MQTT do I need?
+
+| Setup | Standard `koenkk/zigbee2mqtt` | `ghcr.io/tostmann/zigbee2mqtt-esp32` |
+|---|---|---|
+| **Fresh install** (empty chip, first start) | ✅ Works | ✅ Works |
+| **Existing network**, `configuration.yaml` matches device's persisted `channel` / `panID` / `extendedPanID` | ✅ Works — devices stay paired across reboots (cold-boot panID race fix) | ✅ Works |
+| **Existing network**, `configuration.yaml` channel/panID **differs** from device — e.g. migrating between coordinators, or re-aiming at a different network | ⚠️ z2m calls `reset(FactoryReset)` and hangs on a 10 s timeout; the chip's NVRAM gets erased in the process, so paired devices are effectively lost on next start | ✅ Reset → factory-reset → re-form flow completes end-to-end, then devices can be re-paired (or restored from a backup `coordinator_backup.json`) |
+| **Coordinator hardware migration** (swap ESP32 chip, keep network) | ❌ No native backup/restore support | ✅ Raw-NVRAM transfer over the wire — paired devices come back without re-pairing if the snapshot is recent |
+
+**TL;DR**: if your `configuration.yaml` already matches the device's persisted network, the standard z2m works fine.  If you need to change network parameters, migrate hardware, or just want the safety net of automated NVRAM snapshots, use the `tostmann/zigbee2mqtt-esp32` Docker image.
+
+The relevant host-side patches (`RESTORE_NETWORK` adapter integration plus the `onPackage`-during-`inReset` fix that closes the factory-reset hang) live in `scripts/patch_zboss.js` on the [`tostmann/zigbee2mqtt`](https://github.com/tostmann/zigbee2mqtt) fork and are applied automatically via npm `postinstall`.  See [`patches/herdsman-ncp-reset-fix.md`](./patches/herdsman-ncp-reset-fix.md) in this repo for the technical rationale.
 
 👉 **[Read the full Zigbee2MQTT Setup & Migration Guide](ZIGBEE2MQTT.md)**
 
