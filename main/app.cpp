@@ -55,6 +55,13 @@ esp_err_t app::process_event(const ctx_t& ctx) {
             }
             break;
         case EVENT_RESET:
+            // Give the just-sent NCP_RESET response time to drain the
+            // USB-Serial/JTAG TX ring before we yank the rug. The OK ACK is
+            // sent synchronously from the request handler before EVENT_RESET
+            // is dequeued, but usb_serial_jtag_write_bytes returns once the
+            // bytes are queued, not transmitted. Without this delay the host
+            // race-loses the ACK on busy USB hubs.
+            vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
             break;
         default:
