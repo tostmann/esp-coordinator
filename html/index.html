@@ -159,6 +159,36 @@
             font-size: 12px;
             color: #64748b;
         }
+
+        /* Collapsible transfer-image section (advanced/optional) */
+        details.transfer-box {
+            margin: 40px 0 20px 0;
+            background: #fffbeb;
+            border: 1px solid #fcd34d;
+            border-radius: 8px;
+        }
+        details.transfer-box > summary {
+            cursor: pointer;
+            padding: 15px 20px;
+            font-weight: 600;
+            font-size: 16px;
+            color: #78350f;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        details.transfer-box > summary::-webkit-details-marker { display: none; }
+        details.transfer-box > summary::after {
+            content: "▾";
+            color: #d97706;
+            transition: transform 0.15s;
+        }
+        details.transfer-box[open] > summary::after { transform: rotate(180deg); }
+        .transfer-box-body {
+            padding: 0 20px 20px 20px;
+            text-align: center;
+        }
     </style>
     <!-- ESP Web Tools -->
     <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
@@ -234,29 +264,31 @@ advanced:
         • ZHA/Zigpy is officially not supported; please use Zigbee2MQTT exclusively.
     </div>
 
-    <div class="flasher-box" style="background: #fffbeb; border-color: #fcd34d; margin-top: 40px;">
-        <h3 style="margin-top:0;">3. Network Transfer Image (Optional)</h3>
-        <p style="font-size: 14px; color: #475569;">
-            <strong>You do not need to do this for a new setup!</strong><br>
-            Use this tool to extract an existing Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator hardware and transfer it to a new ESP32-C6.
-        </p>
+    <details class="transfer-box">
+        <summary>3. Network Transfer Image (Advanced, optional)</summary>
+        <div class="transfer-box-body">
+            <p style="font-size: 14px; color: #475569;">
+                <strong>You do not need to do this for a new setup!</strong><br>
+                Use this tool to extract an existing Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator hardware and transfer it to a new ESP32-C6.
+            </p>
 
-        <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
-            <strong>⚠️ Warning: Not a long-term "Backup"</strong><br>
-            This extracts a raw memory image containing exact Frame Counters. If you restore an image that is too old (where devices have sent many messages since the image was taken), your devices will reject the coordinator to prevent Replay Attacks and must be re-paired. <strong>Use this primarily for immediate hardware migration.</strong>
+            <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
+                <strong>⚠️ Warning: Not a long-term "Backup"</strong><br>
+                This extracts a raw memory image containing exact Frame Counters. If you restore an image that is too old (where devices have sent many messages since the image was taken), your devices will reject the coordinator to prevent Replay Attacks and must be re-paired. <strong>Use this primarily for immediate hardware migration.</strong>
+            </div>
+
+            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
+                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Download Transfer Image</button>
+                <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
+                    <span id="restoreText">1. Select File</span>
+                    <input type="file" id="restoreFile" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. File Selected!';">
+                </label>
+                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Transfer to ESP32</button>
+            </div>
+            <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
+            <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
         </div>
-        
-        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
-            <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Download Transfer Image</button>
-            <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
-                <span id="restoreText">1. Select File</span>
-                <input type="file" id="restoreFile" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. File Selected!';">
-            </label>
-            <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Transfer to ESP32</button>
-        </div>
-        <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
-        <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
-    </div>
+    </details>
 </div>
 
 <script src="zboss_backup.js"></script>
