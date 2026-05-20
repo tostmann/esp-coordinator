@@ -99,9 +99,68 @@
         esp-web-install-button {
             margin-top: 10px;
         }
+        /* Release notes */
+        details.release-notes {
+            margin: 25px 0 10px 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: #f8fafc;
+        }
+        details.release-notes > summary {
+            cursor: pointer;
+            padding: 12px 16px;
+            font-weight: 600;
+            font-size: 15px;
+            color: #334155;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        details.release-notes > summary::-webkit-details-marker { display: none; }
+        details.release-notes > summary::after {
+            content: "▾";
+            color: #94a3b8;
+            transition: transform 0.15s;
+        }
+        details.release-notes[open] > summary::after { transform: rotate(180deg); }
+        .release-notes-body {
+            padding: 0 16px 16px 16px;
+            font-size: 14px;
+            line-height: 1.55;
+            color: #334155;
+            max-height: 450px;
+            overflow-y: auto;
+        }
+        .release-notes-body h2 { font-size: 16px; margin-top: 18px; }
+        .release-notes-body h3 { font-size: 14px; margin-top: 14px; color: #1e293b; }
+        .release-notes-body code {
+            background: #e2e8f0;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .release-notes-body pre {
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            overflow-x: auto;
+        }
+        .release-notes-body pre code { background: transparent; padding: 0; color: inherit; }
+        .release-notes-body ul { padding-left: 20px; }
+        .release-notes-body a { color: var(--primary); }
+        .release-notes-meta {
+            padding: 0 16px 8px 16px;
+            font-size: 12px;
+            color: #64748b;
+        }
     </style>
     <!-- ESP Web Tools -->
     <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+    <!-- Markdown renderer for release notes -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@13/marked.min.js"></script>
 </head>
 <body>
 
@@ -116,7 +175,7 @@
         <div class="header-text">
             <h1>ESP-Coordinator (ZBOSS NCP)</h1>
             <div style="font-size: 14px; color: #64748b;">
-                <strong>Version:</strong> v1.1.0<br>
+                <strong>Version:</strong> <span id="firmware-version">lädt…</span><br>
                 <strong>Hardware:</strong> ESP32-C6<br>
                 <strong>Zweck:</strong> Zigbee Coordinator Firmware für Z2M<br>
                 <strong>Quellcode:</strong> <a href="https://github.com/tostmann/esp-coordinator" target="_blank" style="color: var(--primary); text-decoration: none;">GitHub Repository</a>
@@ -129,6 +188,12 @@
         Dieses Tool flasht die Firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> direkt über den Browser auf deinen ESP32-C6. 
         Der Prozess überprüft automatisch, ob es sich bei dem angeschlossenen Gerät tatsächlich um einen <b>ESP32-C6</b> handelt.
     </div>
+
+    <details class="release-notes" id="release-notes">
+        <summary>Release Notes</summary>
+        <div class="release-notes-meta" id="release-notes-meta">lädt…</div>
+        <div class="release-notes-body" id="release-notes-body">lädt…</div>
+    </details>
 
     <div class="flasher-box">
         <h3 style="margin-top:0;">1. Verbinde dein Gerät via USB</h3>
@@ -192,5 +257,63 @@ advanced:
 </div>
 
 <script src="zboss_backup.js"></script>
+<script>
+    // Populate firmware version + release notes from the latest GitHub release.
+    // Keeps the landing page in sync with the upstream repo without manual edits
+    // on each release. Falls back gracefully to the bundled manifest version if
+    // the GitHub API is unreachable (rate-limited, offline, etc.).
+    (async function () {
+        const versionEl = document.getElementById("firmware-version");
+        const metaEl = document.getElementById("release-notes-meta");
+        const bodyEl = document.getElementById("release-notes-body");
+
+        async function readManifestVersion() {
+            try {
+                const m = await fetch("manifest.json", { cache: "no-store" });
+                if (!m.ok) return null;
+                const json = await m.json();
+                return json.version || null;
+            } catch (_) { return null; }
+        }
+
+        try {
+            const r = await fetch(
+                "https://api.github.com/repos/tostmann/esp-coordinator/releases/latest",
+                { headers: { "Accept": "application/vnd.github+json" } }
+            );
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const rel = await r.json();
+            const tag = rel.tag_name || "(unbekannt)";
+            const published = rel.published_at
+                ? new Date(rel.published_at).toISOString().slice(0, 10)
+                : "(Datum unbekannt)";
+            const url = rel.html_url || "#";
+
+            versionEl.textContent = tag;
+            metaEl.innerHTML =
+                "Veröffentlicht " + published +
+                " · <a href=\"" + url + "\" target=\"_blank\">Auf GitHub ansehen</a>";
+
+            if (typeof marked !== "undefined" && rel.body) {
+                bodyEl.innerHTML = marked.parse(rel.body);
+                bodyEl.querySelectorAll("a[href^=\"http\"]").forEach(function (a) {
+                    a.target = "_blank";
+                    a.rel = "noopener";
+                });
+            } else if (rel.body) {
+                const pre = document.createElement("pre");
+                pre.textContent = rel.body;
+                bodyEl.replaceChildren(pre);
+            } else {
+                bodyEl.textContent = "(keine Release Notes)";
+            }
+        } catch (e) {
+            const fallback = await readManifestVersion();
+            versionEl.textContent = fallback || "(unbekannt)";
+            const detail = document.getElementById("release-notes");
+            if (detail) detail.style.display = "none";
+        }
+    })();
+</script>
 </body>
 </html>
