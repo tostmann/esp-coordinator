@@ -93,11 +93,29 @@ esp_err_t app::start_int() {
 	if (res != ESP_OK)
 		return res;
 
-    // https://github.com/andryblack/esp-coordinator/issues/11 - Add an NCP reset response after firmware startup #11
-    uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F}; //ack
-    uint8_t raw_data1[] = {0xDE, 0xAD, 0x0E, 0x00, 0x06, 0xC0, 0x5D, 0x50, 0xD4, 0x00, 0x01, 0x02, 0x00, 0xFF, 0x00, 0x00}; // NCP_RESET response (cmd=0x0002, tsn=0xFF, status=OK)
+    // Boot-time framing-level ACK. Sent immediately at start-up so z2m's
+    // open-port handshake doesn't time out waiting for ANY frame from us.
+    // Carries no NVRAM-state-dependent fields — flags byte is_ack=1 with
+    // packet_seq=0 and ack_seq=0 (the "wake up call" pattern from
+    // andryblack/esp-coordinator#11).
+    uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
     transport::send(raw_data, sizeof(raw_data));
-    transport::send(raw_data1, sizeof(raw_data1));
+
+    // The synthetic NCP_RESET *response* (cmd=0x0002, tsn=0xFF, status=OK)
+    // used to be sent here, but doing so before ZBOSS finished loading its
+    // NVRAM made z2m proceed to needsToBeInitialised() too early:
+    // GET_PAN_ID / GET_EXTENDED_PAN_ID / GET_ZIGBEE_CHANNEL returned the
+    // uninitialised defaults (0xFFFF / 0xFF), z2m saw a "different" network
+    // than its configured options, and called formNetwork() — which trashes
+    // the entire device DB.  See andryblack/esp-coordinator#5 (z2m #26152)
+    // for the original report and #19 for the regression confirming PR #6's
+    // 'move zboss_start_no_autostart() into init_int()' alone wasn't
+    // sufficient: the NVRAM load itself only completes inside zboss_main_loop
+    // (on the dedicated ZBOSS FreeRTOS task), and we used to race against
+    // that here.  The boot-ready frame is now sent from zb_ncp::continue_zboss,
+    // which is scheduled from the ZB_ZDO_SIGNAL_SKIP_STARTUP handler — the
+    // earliest signal at which the dataset is guaranteed loaded and
+    // zb_get_pan_id() returns the persisted value.
 
  	// uint8_t outdata[2] = { 0,0 };
     // esp_ncp_header_t header = {{0,0,0,},NCP_RESET,0,0};

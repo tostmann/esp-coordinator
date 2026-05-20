@@ -3,6 +3,7 @@
 #include "protocol.h"
 #include "statuses.h"
 #include "utils.h"
+#include "transport.h"
 
 static const char* TAG = "NCP";
 
@@ -228,11 +229,41 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
 
 void zb_ncp::continue_zboss(uint8_t arg) {
     ESP_LOGI(TAG,"continue_zboss");
-    zb_af_set_data_indication(data_indication);
-    
-    
 
-   
+    // Cold-boot race fix (andryblack/esp-coordinator#5 + regression in #19).
+    // The synthetic NCP_RESET response (cmd=0x0002, type=RESPONSE, tsn=0xFF,
+    // status=OK) used to be sent unconditionally from app::start_int() at
+    // boot, BEFORE ZBOSS finished loading its NVRAM dataset. z2m's first
+    // getNetworkInfo() call (driver.js:152, sequence GET_JOINED →
+    // GET_ZIGBEE_ROLE → GET_LOCAL_IEEE_ADDR → GET_EXTENDED_PAN_ID →
+    // GET_PAN_ID → GET_ZIGBEE_CHANNEL) then returned the uninitialised
+    // 0xFFFF / 0xFF defaults; z2m compared against its configured options,
+    // found a mismatch, and called formNetwork() — wiping every paired
+    // device. We send the boot-ready frame here instead because
+    // ZB_ZDO_SIGNAL_SKIP_STARTUP is the earliest stack signal at which the
+    // NVRAM dataset is guaranteed loaded; zb_get_pan_id() and friends now
+    // return the persisted values by the time z2m queries them. PR#6 in
+    // upstream andryblack/esp-coordinator moved zboss_start_no_autostart()
+    // into init_int() (we have that) but the dataset load itself runs on
+    // the dedicated ZBOSS task inside zboss_main_loop, so PR#6 alone left
+    // a race window — closed by deferring the boot-ready frame.
+    static const uint8_t boot_ready_frame[] = {
+        0xDE, 0xAD,             // signature
+        0x0E, 0x00,             // packet_len = 14
+        0x06,                   // packet_type = ZBOSS_NCP_API_HL
+        0xC0,                   // flags: first_fragment=1, last_fragment=1
+        0x5D,                   // header CRC8
+        0x50, 0xD4,             // payload CRC16
+        0x00,                   // version
+        0x01,                   // type = RESPONSE
+        0x02, 0x00,             // command_id = NCP_RESET (0x0002, LE)
+        0xFF,                   // tsn = 0xFF (unsolicited-boot sentinel)
+        0x00, 0x00              // CATEGORY_GENERIC, GENERIC_OK
+    };
+    transport::send(boot_ready_frame, sizeof(boot_ready_frame));
+
+    zb_af_set_data_indication(data_indication);
+
     ESP_LOGI(TAG,"continue_zboss 1");
     // ncp_cmd_handle<S_ESP_NCP_NETWORK_INIT>::response(0);
 
