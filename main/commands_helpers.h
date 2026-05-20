@@ -43,7 +43,15 @@ struct zb_ncp::delayed_cmd_process : public ResolveStrategyT<CmdId>{
 	using Cmd = cmd_handle<CmdId>;
 	using ResolveStrategy = ResolveStrategyT<CmdId>;
     static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
-    	ResolveStrategy::start_resolve(cmd);
+    	if (!ResolveStrategy::start_resolve(cmd)) {
+    		// Slot already holds a prior async request — reject the duplicate
+    		// immediately so the host's outer timeout doesn't fire on it.
+    		// The in-flight original is left untouched and will complete
+    		// normally via zboss_signal_handler -> response().
+    		ESP_LOGW(TAG, "%s: busy, prior request pending", Cmd::name);
+    		cmd_base<Cmd>::report_failed(cmd, GENERIC_BUSY);
+    		return;
+    	}
         int res = Cmd::start_delayed(buffer,len);
         if (res != 0) {
             ESP_LOGE(TAG,"%s:process_delayed:process failed start_delayed",Cmd::name);
@@ -67,8 +75,17 @@ struct zb_ncp::delayed_cmd_process : public ResolveStrategyT<CmdId>{
 template <command_id_t CmdId>
 struct single_cmd_delayed {
 	static zb_ncp::cmd_t m_cmd;
-	static void start_resolve(const zb_ncp::cmd_t& cmd) {
+	// Returns true if the single slot was free and is now reserved for `cmd`.
+	// Returns false if a prior async invocation of the same command is still
+	// pending — caller should reject the new request rather than silently
+	// overwriting the saved cmd (which loses the first one's tsn/seq and
+	// guarantees the host times out on it).
+	static bool start_resolve(const zb_ncp::cmd_t& cmd) {
+		if (m_cmd.command_id == CmdId) {
+			return false;
+		}
 		m_cmd = cmd;
+		return true;
 	}
 	static bool need_resolve() {
 		return m_cmd.command_id == CmdId;
