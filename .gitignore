@@ -37,5 +37,11 @@
 
 # v6 IDF env wrapper (parallel to idf_env.sh, host-local)
 /idf_env.v6.sh
+
+# Agent harness state — session IDs, PIDs, scheduled-task locks. Must
+# never be tracked: bump_build.sh-style pre-build hooks otherwise sweep
+# scheduled_tasks.lock etc. into snapshot commits (cf. EULFW32 incident
+# 2026-05-20 with .claude/scheduled_tasks.lock landing in v0.3.122).
+/.claude/
 /.gemini/
 /.geminignore
