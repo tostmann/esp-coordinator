@@ -43,13 +43,30 @@ size_t transport::output_receive(void* buffer, size_t size) {
 }
 
 esp_err_t transport::process_input_int(void* buffer, size_t size) {
-	auto recv_size = xStreamBufferReceive(m_input_buf, buffer, size, pdMS_TO_TICKS(RINGBUF_TIMEOUT_MS));
-    if (recv_size != size) {
-        ESP_LOGE(TAG, "Input buffer receive error: size %d expect %d!", recv_size, size);
-        return ESP_FAIL;
-    } else {
-        return write_int(buffer, size);
-    }
+	// xStreamBufferReceive can return less than `size` when the stream buffer's
+	// trigger level fires earlier (created at level 8). The previous code then
+	// bailed with ESP_FAIL, leaving the partial bytes to bleed into the next
+	// EVENT_INPUT's batch and desynchronising the firmware->host frame stream.
+	// Now we top-up under a single overall deadline so all `size` bytes either
+	// arrive together or we fail cleanly with nothing partially written.
+	size_t got = 0;
+	const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(RINGBUF_TIMEOUT_MS);
+	while (got < size) {
+		TickType_t now = xTaskGetTickCount();
+		if (now >= deadline) break;
+		auto chunk = xStreamBufferReceive(m_input_buf,
+		                                  static_cast<uint8_t*>(buffer) + got,
+		                                  size - got,
+		                                  deadline - now);
+		if (chunk == 0) break;
+		got += chunk;
+	}
+	if (got != size) {
+		ESP_LOGE(TAG, "Input buffer receive error: got %u expect %u!",
+		         unsigned(got), unsigned(size));
+		return ESP_FAIL;
+	}
+	return write_int(buffer, size);
 }
 
 esp_err_t transport::send_int(const void* data, size_t size) {
