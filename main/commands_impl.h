@@ -459,6 +459,22 @@ struct zb_ncp::cmd_handle<GET_COORDINATOR_VERSION> : immediate_cmd_process<GET_C
 };
 
 
+// Get own short address. Needed by zigpy-zboss's ControllerApplication.
+// load_network_info() — without this, NWKAddr stays None and start_network's
+// ZbossCoordinator construction raises TypeError(int(None)).
+// [CommandId.GET_SHORT_ADDRESS]: {
+//     request: [],
+//     response: [...commonResponse, {name: 'nwk', type: DataType.UINT16}],
+// },
+template <>
+struct zb_ncp::cmd_handle<GET_SHORT_ADDRESS> : immediate_cmd_process<GET_SHORT_ADDRESS>,
+		general_status_res<GET_SHORT_ADDRESS,uint16_t> {
+	static void process_status_res(ncp_generic_status_t& status, uint16_t* res) {
+		*res = zb_get_short_address();
+    }
+};
+
+
 // Sets TC Policy
 // [CommandId.SET_TC_POLICY]: {
 //     request: [
