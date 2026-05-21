@@ -73,6 +73,27 @@ The relevant host-side patches (`RESTORE_NETWORK` adapter integration plus the `
 
 👉 **[Read the full Zigbee2MQTT Setup & Migration Guide](ZIGBEE2MQTT.md)**
 
+## Home Assistant ZHA (experimental)
+
+If you would rather drive the coordinator from Home Assistant's native ZHA
+integration (i.e. avoid running Z2M at all), the
+[`tostmann/zha-zboss-esp`](https://github.com/tostmann/zha-zboss-esp)
+custom-component is the path. It is HACS-installable, bundles
+`zigpy-zboss` as a Python requirement, runtime-patches the known library
+compat gaps against current zigpy / serialx, and extends ZHA's
+`RadioType` enum so **ZBOSS** appears as a selectable radio type in the
+add-integration flow.
+
+**Status as of v1.1.23**: setup gets through firmware probe / radio-type
+pick / network formation cleanly. The full end-to-end add-integration flow
+beyond that still hits additional `zigpy-zboss` bit-rot against zigpy 1.4
+that is outside this firmware's scope to fix — those gaps are tracked in
+[`kardia-as/zigpy-zboss#19`](https://github.com/kardia-as/zigpy-zboss/issues/19)
+and PR [`#74`](https://github.com/kardia-as/zigpy-zboss/pull/74) is
+addressing the first two. **For production use, the Z2M path above remains
+the recommended option.** The ZHA path is shaping up but not yet a no-rough-
+edges experience.
+
 ## Configuration Example (zigbee2mqtt)
 
 Use the stable JTAG USB serial port in your `configuration.yaml` and configure the transmit power to fully utilize the ESP32-C6 amplifier:
