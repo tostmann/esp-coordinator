@@ -2030,3 +2030,199 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
     }
 };
 
+
+// =====================================================================
+// Structured backup — GET_STRUCTURED_BACKUP (0x009B) / RESTORE_STRUCTURED_BACKUP (0x009C)
+//
+// Replaces the brittle raw-NVS dump (0x0099/0x009A) with a small TLV image
+// that carries the semantically meaningful network identity (PAN, ExtPAN,
+// channel, updateId, IEEE, NWK key, NWK outgoing frame counter) plus an
+// informational device-table snapshot. Wire layout in backup_structured.h.
+//
+// Limitations:
+//   - TC link key is setter-only in esp-zigbee-lib, so backups do not carry
+//     it; RESTORE leaves the default ZigBeeAlliance09 TC key in place.
+//     Devices joined with a custom-TC key will need re-pair.
+//   - NWK key sequence number has no public getter; backups omit it and
+//     RESTORE installs the network key at the stack default seq (devices
+//     re-sync within one Network-Status round-trip in practice).
+//   - APS per-peer frame counters are not exported either; APS-level strict
+//     replay enforcers may briefly drop frames after restore until they
+//     re-sync via the standard rejoin path.
+//   - TAG_DEVICE_TABLE is informational (host-side only). RESTORE ignores
+//     it — the firmware does not pre-populate the neighbor table; existing
+//     devices rejoin via Device_annce once the network is back on air.
+// =====================================================================
+
+#include "backup_structured.h"
+#include "nwk/esp_zigbee_nwk.h"
+#include "esp_zigbee_secur.h"
+
+template <>
+struct zb_ncp::cmd_handle<GET_STRUCTURED_BACKUP> : immediate_cmd_process<GET_STRUCTURED_BACKUP> {
+    static constexpr size_t resp_buffer_size =
+        sizeof(generic_response_t) + backup_structured::MAX_IMAGE_SIZE;
+
+    static size_t process_immediate(const void *inbuffer, size_t inlen,
+                                    uint8_t* outdata, size_t outdata_size) {
+        auto status = reinterpret_cast<generic_response_t*>(outdata);
+        status->category = STATUS_CATEGORY_GENERIC;
+        status->status   = GENERIC_OK;
+
+        uint8_t* image_start = outdata + sizeof(generic_response_t);
+        uint8_t* cursor      = image_start;
+
+        // Reserve room for the header — patched up at the end with payload_len.
+        auto hdr = reinterpret_cast<backup_structured::header_t*>(cursor);
+        memcpy(hdr->magic, backup_structured::MAGIC, 4);
+        hdr->version = backup_structured::VERSION;
+        hdr->flags   = 0;
+        cursor += sizeof(backup_structured::header_t);
+        uint8_t* tlv_start = cursor;
+
+        // Emits one TLV: tag(1) + len(2 LE) + value(len). Increments cursor.
+        auto emit = [&](uint8_t tag, const void* value, uint16_t len) {
+            *cursor++ = tag;
+            memcpy(cursor, &len, 2);  cursor += 2;
+            memcpy(cursor, value, len); cursor += len;
+        };
+
+        uint16_t pan = esp_zb_get_pan_id();
+        emit(backup_structured::TAG_PAN_ID, &pan, 2);
+
+        esp_zb_ieee_addr_t ext_pan;
+        esp_zb_get_extended_pan_id(ext_pan);
+        emit(backup_structured::TAG_EXT_PAN_ID, ext_pan, 8);
+
+        uint8_t chan = esp_zb_get_current_channel();
+        emit(backup_structured::TAG_CHANNEL, &chan, 1);
+
+        uint8_t upd = esp_zb_nwk_get_update_id();
+        emit(backup_structured::TAG_NWK_UPDATE_ID, &upd, 1);
+
+        esp_zb_ieee_addr_t ieee;
+        esp_zb_get_long_address(ieee);
+        emit(backup_structured::TAG_COORD_IEEE, ieee, 8);
+
+        uint8_t nwk_key[16];
+        if (esp_zb_secur_primary_network_key_get(nwk_key) == ESP_OK) {
+            emit(backup_structured::TAG_NWK_KEY, nwk_key, 16);
+        } else {
+            ESP_LOGW(TAG, "GET_STRUCTURED_BACKUP: NWK key not available (not joined?)");
+        }
+
+        uint32_t fc = esp_zb_nwk_get_frame_counter();
+        emit(backup_structured::TAG_NWK_FRAME_COUNTER, &fc, 4);
+
+        // Device table: open a TLV with placeholder len, iterate neighbors,
+        // patch the length once the count is known.
+        uint8_t* dev_tlv = cursor;
+        *cursor++ = backup_structured::TAG_DEVICE_TABLE;
+        uint8_t* dev_len_field = cursor;
+        cursor += 2;
+
+        esp_zb_nwk_info_iterator_t iter = ESP_ZB_NWK_INFO_ITERATOR_INIT;
+        esp_zb_nwk_neighbor_info_t nbr;
+        size_t dev_count = 0;
+        while (dev_count < backup_structured::MAX_DEVICES &&
+               esp_zb_nwk_get_next_neighbor(&iter, &nbr) == ESP_OK) {
+            auto rec = reinterpret_cast<backup_structured::device_record_t*>(cursor);
+            memcpy(rec->ieee, nbr.ieee_addr, 8);
+            rec->short_addr      = nbr.short_addr;
+            rec->rx_on_when_idle = nbr.rx_on_when_idle;
+            rec->relationship    = nbr.relationship;
+            rec->device_type     = nbr.device_type;
+            rec->depth           = nbr.depth;
+            rec->lqi             = nbr.lqi;
+            rec->reserved        = 0;
+            cursor += sizeof(backup_structured::device_record_t);
+            ++dev_count;
+        }
+        uint16_t dev_len = dev_count * sizeof(backup_structured::device_record_t);
+        memcpy(dev_len_field, &dev_len, 2);
+        (void)dev_tlv;
+
+        hdr->payload_len = cursor - tlv_start;
+        ESP_LOGI(TAG, "GET_STRUCTURED_BACKUP: %u devices, image %u bytes",
+                 (unsigned)dev_count, (unsigned)(cursor - image_start));
+
+        return cursor - outdata;
+    }
+};
+
+
+// RESTORE writes the validated TLV image to NVS under "restore_pend"/"tlv",
+// erases the ZBOSS storage partition so the stack does not pre-load the old
+// network on next boot, and schedules a reboot. The actual application of
+// settings happens in zb_ncp::apply_pending_restore() right after ZB_INIT in
+// init_int(), where the esp_zb_set_* / esp_zb_secur_* APIs are in their
+// legal "not yet joined" state.
+template <>
+struct zb_ncp::cmd_handle<RESTORE_STRUCTURED_BACKUP> : immediate_cmd_process<RESTORE_STRUCTURED_BACKUP> {
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t);
+
+    static size_t reply(uint8_t* outdata, ncp_generic_status_t s) {
+        auto r = reinterpret_cast<generic_response_t*>(outdata);
+        r->category = STATUS_CATEGORY_GENERIC;
+        r->status   = s;
+        return sizeof(generic_response_t);
+    }
+
+    static size_t process_immediate(const void *inbuffer, size_t inlen,
+                                    uint8_t* outdata, size_t outdata_size) {
+        if (inlen < sizeof(backup_structured::header_t)) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: short frame %u", (unsigned)inlen);
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+        auto in = static_cast<const uint8_t*>(inbuffer);
+        backup_structured::header_t hdr;
+        memcpy(&hdr, in, sizeof(hdr));  // unaligned-safe
+        if (memcmp(hdr.magic, backup_structured::MAGIC, 4) != 0) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: bad magic");
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+        if (hdr.version != backup_structured::VERSION) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: version %u, expected %u",
+                     hdr.version, backup_structured::VERSION);
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+        if ((size_t)sizeof(hdr) + hdr.payload_len > inlen) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: declared %u + hdr > inlen %u",
+                     hdr.payload_len, (unsigned)inlen);
+            return reply(outdata, GENERIC_INVALID_PARAMETER);
+        }
+
+        nvs_handle_t nh;
+        esp_err_t err = nvs_open("restore_pend", NVS_READWRITE, &nh);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: nvs_open failed: %s",
+                     esp_err_to_name(err));
+            return reply(outdata, GENERIC_OPERATION_FAILED);
+        }
+        err = nvs_set_blob(nh, "tlv", inbuffer, inlen);
+        if (err == ESP_OK) err = nvs_commit(nh);
+        nvs_close(nh);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: nvs_set_blob/commit failed: %s",
+                     esp_err_to_name(err));
+            return reply(outdata, GENERIC_OPERATION_FAILED);
+        }
+
+        // Wipe the ZBOSS storage so the stack does a fresh init on next boot
+        // — the apply_pending_restore() hook will then plant the saved
+        // settings before the stack persists them via its normal save path.
+        const auto zb_part = backup_zb_partition();
+        if (zb_part) {
+            esp_partition_erase_range(zb_part, 0, zb_part->size);
+        } else {
+            ESP_LOGW(TAG, "RESTORE_STRUCTURED_BACKUP: zb_storage partition missing");
+        }
+
+        ESP_LOGI(TAG, "RESTORE_STRUCTURED_BACKUP: %u-byte image stored, rebooting in 1s",
+                 (unsigned)inlen);
+        xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
+                    "rb_struct", 2048, NULL, 5, NULL);
+
+        return reply(outdata, GENERIC_OK);
+    }
+};

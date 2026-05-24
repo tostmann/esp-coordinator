@@ -33,6 +33,8 @@ COMMAND(GET_SHORT_ADDRESS,                      0x0025)
     // NVRAM_READ = 0x002f,
 COMMAND(GET_NETWORK_BACKUP,                     0x0099)
 COMMAND(RESTORE_NETWORK,                        0x009A)
+COMMAND(GET_STRUCTURED_BACKUP,                  0x009B)
+COMMAND(RESTORE_STRUCTURED_BACKUP,              0x009C)
     // NVRAM_ERASE = 0x0030,
     // NVRAM_CLEAR = 0x0031,
 COMMAND(SET_TC_POLICY,                          0x0032)

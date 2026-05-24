@@ -4,10 +4,176 @@
 #include "statuses.h"
 #include "utils.h"
 #include "transport.h"
+#include "backup_structured.h"
+#include "nwk/esp_zigbee_nwk.h"
+#include "esp_zigbee_secur.h"
+#include <nvs.h>
+// NOTE: deliberately NOT including esp_zigbee_core.h — referencing any of its
+// symbols (e.g. esp_zb_set_primary_network_channel_set) pulls in
+// esp_zigbee_core.c.obj from libesp_zb_api.zczr.a, which redefines our own
+// zboss_signal_handler below and causes a link-time multiple-definition.
+// For channel-mask setup during restore we use the zboss-direct zb_set_* APIs
+// already wired up via zb_ncp::set_channel_mask.
 
 static const char* TAG = "NCP";
 
 #include "commands_impl.h"
+
+// Set to true by apply_pending_restore() when it actually applies a TLV.
+// continue_zboss reads it to force NETWORK_FORMATION (which performs the
+// channel-scan step) instead of the default STEERING — without the explicit
+// formation kick, ZBOSS reports joined=true but the radio sits on channel
+// 255 (uninitialised) because no scan ever ran. See espressif/esp-zigbee-sdk#445
+// for the underlying constraint: setters only take effect in factory-reset
+// state, so the restore-applied flag also gates a formation pass that uses
+// our just-set NIB values rather than re-randomising them.
+static bool s_restore_applied = false;
+
+// Pulls "restore_pend"/"tlv" out of NVS (set by RESTORE_STRUCTURED_BACKUP
+// before the prior reboot) and replays it into the freshly-initialised
+// stack via the esp_zb_set_* / esp_zb_secur_* APIs. Must run after ZB_INIT
+// (so esp_zb_set_long_address is legal) and before the stack is on a
+// network (so the *_set_frame_counter / *_set_update_id / *_network_key_set
+// APIs do not return ESP_ERR_INVALID_STATE).  Blob is erased after a
+// successful apply so the restore is one-shot.
+//
+// Devices joined to the prior network rejoin via Device_annce once the
+// coordinator is back on air with the same PAN+ExtPAN+channel+key; the
+// neighbor table is rebuilt by ZBOSS, so TAG_DEVICE_TABLE is ignored here.
+static void apply_pending_restore() {
+    nvs_handle_t nh;
+    esp_err_t err = nvs_open("restore_pend", NVS_READWRITE, &nh);
+    if (err != ESP_OK) {
+        return; // no pending restore is the common path
+    }
+    size_t blob_size = 0;
+    err = nvs_get_blob(nh, "tlv", nullptr, &blob_size);
+    if (err != ESP_OK || blob_size < sizeof(backup_structured::header_t)) {
+        nvs_close(nh);
+        return;
+    }
+    auto* buf = static_cast<uint8_t*>(malloc(blob_size));
+    if (!buf) {
+        ESP_LOGE(TAG, "apply_pending_restore: malloc(%u) failed", (unsigned)blob_size);
+        nvs_close(nh);
+        return;
+    }
+    err = nvs_get_blob(nh, "tlv", buf, &blob_size);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "apply_pending_restore: nvs_get_blob failed: %s", esp_err_to_name(err));
+        free(buf);
+        nvs_close(nh);
+        return;
+    }
+    // Erase + persist BEFORE applying setters — guards against a setter call
+    // panicking the chip and entering an infinite crash-loop. If apply crashes
+    // here, the next boot finds an empty namespace and boots normally; the
+    // network identity is then lost (user must re-restore manually) but the
+    // chip is recoverable without reflashing.
+    nvs_erase_key(nh, "tlv");
+    nvs_commit(nh);
+    nvs_close(nh);
+
+    backup_structured::header_t hdr;
+    memcpy(&hdr, buf, sizeof(hdr));
+    if (memcmp(hdr.magic, backup_structured::MAGIC, 4) != 0 ||
+        hdr.version != backup_structured::VERSION ||
+        sizeof(hdr) + hdr.payload_len > blob_size) {
+        ESP_LOGE(TAG, "apply_pending_restore: invalid header (magic/version/len)");
+        free(buf);
+        return;
+    }
+
+    ESP_LOGI(TAG, "apply_pending_restore: replaying %u-byte payload", hdr.payload_len);
+
+    const uint8_t* p   = buf + sizeof(hdr);
+    const uint8_t* end = p + hdr.payload_len;
+    while (p + 3 <= end) {
+        uint8_t  tag = *p++;
+        uint16_t len;
+        memcpy(&len, p, 2);  p += 2;
+        if (p + len > end) {
+            ESP_LOGE(TAG, "apply_pending_restore: TLV 0x%02x len %u runs past end", tag, len);
+            break;
+        }
+        switch (tag) {
+            case backup_structured::TAG_PAN_ID: {
+                if (len != 2) break;
+                uint16_t pan; memcpy(&pan, p, 2);
+                esp_zb_set_pan_id(pan);
+                ESP_LOGI(TAG, "  PAN ID = 0x%04x", pan);
+            } break;
+            case backup_structured::TAG_EXT_PAN_ID: {
+                if (len != 8) break;
+                esp_zb_ieee_addr_t ext;
+                memcpy(ext, p, 8);
+                // CRITICAL: esp_zb_set_extended_pan_id() sets apsUseExtendedPANID
+                // (the JOIN-target ExtPAN), NOT the NWK's own ExtPAN that the
+                // coordinator broadcasts in beacons. For restore we need the NIB-
+                // level setter so the formed network advertises this exact ExtPAN
+                // and previously-paired devices recognise it.
+                // Per espressif/esp-zigbee-sdk#445 (xieqinan), this setter only
+                // takes effect when the chip starts in factoryreset state — our
+                // RESTORE_STRUCTURED_BACKUP handler enforces that by erasing
+                // zb_storage before reboot, so apply_pending_restore runs on a
+                // truly fresh stack here.
+                esp_zb_nwk_set_extended_pan_id(ext);
+                ESP_LOGI(TAG, "  NWK ExtPAN set");
+            } break;
+            case backup_structured::TAG_CHANNEL: {
+                if (len != 1) break;
+                uint8_t ch = *p;
+                if (ch >= 11 && ch <= 26) {
+                    uint32_t mask = 1u << ch;
+                    // Use the zboss-direct setters (same path as
+                    // zb_ncp::set_channel_mask) — avoids pulling
+                    // esp_zigbee_core.c.obj into the link (see include note).
+                    zb_set_channel_mask(mask);
+                    zb_set_bdb_primary_channel_set(mask);
+                    zb_set_bdb_secondary_channel_set(mask);
+                    ESP_LOGI(TAG, "  Channel = %u (mask 0x%08lx)", ch, (unsigned long)mask);
+                }
+            } break;
+            case backup_structured::TAG_NWK_UPDATE_ID: {
+                if (len != 1) break;
+                esp_zb_nwk_set_update_id(*p);
+                ESP_LOGI(TAG, "  NWK update id = %u", *p);
+            } break;
+            case backup_structured::TAG_COORD_IEEE: {
+                if (len != 8) break;
+                esp_zb_ieee_addr_t ieee;
+                memcpy(ieee, p, 8);
+                esp_zb_set_long_address(ieee);
+                ESP_LOGI(TAG, "  Long addr set");
+            } break;
+            case backup_structured::TAG_NWK_KEY: {
+                if (len != 16) break;
+                uint8_t key[16];
+                memcpy(key, p, 16);
+                esp_zb_secur_network_key_set(key);
+                ESP_LOGI(TAG, "  NWK key installed");
+            } break;
+            case backup_structured::TAG_NWK_FRAME_COUNTER: {
+                if (len != 4) break;
+                uint32_t fc; memcpy(&fc, p, 4);
+                esp_zb_nwk_set_frame_counter(fc);
+                ESP_LOGI(TAG, "  Frame counter = %lu", (unsigned long)fc);
+            } break;
+            case backup_structured::TAG_DEVICE_TABLE:
+                // Informational only — ZBOSS rebuilds the neighbor table from
+                // Device_annce / NWK Status as devices rejoin.
+                break;
+            default:
+                ESP_LOGW(TAG, "  unknown TLV tag 0x%02x len %u (skipped)", tag, len);
+                break;
+        }
+        p += len;
+    }
+
+    free(buf);
+    s_restore_applied = true;
+    ESP_LOGI(TAG, "apply_pending_restore: done");
+}
 
 zb_ncp::zb_ncp() {
 
@@ -48,6 +214,12 @@ esp_err_t zb_ncp::init_int() {
     zb_set_installcode_policy(0);
     zb_tc_set_use_installcode(0);
     //zgp_disable();
+
+    // Replay a pending RESTORE_STRUCTURED_BACKUP payload from NVS, if any.
+    // Must run after ZB_INIT (so esp_zb_set_long_address etc. are legal) and
+    // before zboss_start_no_autostart() — once the stack reaches the
+    // "joined" state from NVRAM, the setters refuse with INVALID_STATE.
+    apply_pending_restore();
 
     zboss_start_no_autostart();
 
@@ -273,6 +445,16 @@ void zb_ncp::continue_zboss(uint8_t arg) {
         if (!res) {
             cmd_handle<NWK_FORMATION>::response(GENERIC_ERROR);
         }
+    } else if (s_restore_applied) {
+        // After apply_pending_restore: PAN/ExtPAN/Key/UpdateID are in the NIB
+        // but the radio has not yet selected an operating channel (channel scan
+        // hasn't run). STEERING is a no-op for an "already-joined" coord, so
+        // explicitly trigger FORMATION — the configured channel mask narrows
+        // the scan to the restored channel and the NIB values we just set
+        // survive because we are in factory-reset state per #445.
+        ESP_LOGI(TAG, "continue_zboss: restore applied, forcing NETWORK_FORMATION");
+        set_channel_mask(instance().m_channels_mask);
+        bdb_start_top_level_commissioning(ZB_BDB_NETWORK_FORMATION);
     } else {
         bdb_start_top_level_commissioning(ZB_BDB_NETWORK_STEERING);
     }
