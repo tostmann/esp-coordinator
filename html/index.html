@@ -348,6 +348,12 @@ advanced:
   transmit_power: 20
 </pre>
 
+    <div style="background: #f0f9ff; border-left: 4px solid #0ea5e9; padding: 12px 16px; border-radius: 4px; margin-top: 16px; font-size: 13px; line-height: 1.5; color: #1e293b;">
+        <b>Optional: matching Docker image.</b> For seamless coordinator backup/restore (the same NVRAM image used by the Backup/Restore buttons in section 3 below), there is a community-maintained Z2M image that ships the ZBOSS-NCP extensions pre-applied:
+        <pre style="background: transparent; padding: 8px 0 0 0; margin: 6px 0 0 0; color: #0c4a6e; font-size: 12px; overflow-x: auto;">image: ghcr.io/tostmann/zigbee2mqtt-esp32:latest</pre>
+        The standard <code>koenkk/zigbee2mqtt</code> image works perfectly fine too — you just won't get the raw-NVRAM blob captured into <code>coordinator_backup.json</code>. See <a href="https://github.com/tostmann/esp-coordinator/blob/master/ZIGBEE2MQTT.md" target="_blank">ZIGBEE2MQTT.md</a> for details.
+    </div>
+
     <div style="font-size: 13px; color: #64748b; line-height: 1.5; margin-top: 20px;">
         <b>Important Notes:</b><br>
         • The firmware is optimized for maximum stability using the <b>ZBOSS</b> protocol.<br>
