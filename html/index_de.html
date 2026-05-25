@@ -99,6 +99,98 @@
         esp-web-install-button {
             margin-top: 10px;
         }
+
+        /* Coordinator info card */
+        .info-section {
+            margin: 30px 0 20px 0;
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid var(--border);
+        }
+        .info-section h3 { margin-top: 0; }
+        .info-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 12px;
+        }
+        .info-actions button,
+        .info-actions label {
+            padding: 10px 15px;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        .btn-primary   { background: var(--primary); }
+        .btn-secondary { background: #64748b; }
+        .btn-danger    { background: var(--danger); }
+        .btn-success   { background: var(--success); }
+        #info-card {
+            display: none;
+            grid-template-columns: max-content 1fr;
+            gap: 4px 18px;
+            background: white;
+            padding: 14px 18px;
+            border-radius: 6px;
+            margin-top: 14px;
+            font-size: 14px;
+        }
+        #info-card .label   { color: #64748b; font-weight: 600; }
+        #info-card .value   { color: #1e293b; font-family: ui-monospace, monospace; word-break: break-all; }
+        #info-status-line {
+            margin-top: 14px;
+            padding: 10px 14px;
+            border-radius: 4px;
+            font-size: 14px;
+            display: none;
+        }
+        #info-status-line.uptodate { background: #dcfce7; color: #166534; border-left: 4px solid var(--success); }
+        #info-status-line.outdated { background: #fef3c7; color: #78350f; border-left: 4px solid #d97706; }
+        #info-status-line.factory  { background: #e0f2fe; color: #075985; border-left: 4px solid var(--primary); }
+        #info-flash-wrap { display: none; margin-top: 12px; text-align: center; }
+
+        /* Post-restore reboot-wait modal */
+        #reboot-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 23, 42, 0.55);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+        }
+        .reboot-modal-card {
+            background: white;
+            padding: 30px 40px;
+            border-radius: 10px;
+            min-width: 320px;
+            text-align: center;
+            box-shadow: 0 12px 32px rgb(0 0 0 / 0.25);
+        }
+        .reboot-modal-card h3 { margin: 0 0 10px 0; font-size: 20px; color: #1e293b; }
+        .reboot-modal-card p  { color: #475569; font-size: 14px; margin: 0 0 16px 0; }
+        .reboot-spinner {
+            margin: 12px auto;
+            width: 44px; height: 44px;
+            border: 4px solid #e2e8f0;
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: reboot-spin 0.9s linear infinite;
+        }
+        @keyframes reboot-spin { to { transform: rotate(360deg); } }
+        #reboot-modal-countdown {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--primary);
+            margin-top: 8px;
+            font-variant-numeric: tabular-nums;
+        }
+
         /* Release notes */
         details.release-notes {
             margin: 25px 0 10px 0;
@@ -261,31 +353,66 @@ advanced:
         • Zigbee2MQTT ist der empfohlene Host-Stack. Home Assistant ZHA ist experimentell — aktueller Status siehe <a href="https://github.com/tostmann/esp-coordinator#home-assistant-zha-experimental" target="_blank">GitHub README</a>.
     </div>
 
-    <details class="transfer-box">
-        <summary>3. Coordinator-Backup (Z2M-kompatibel)</summary>
-        <div class="transfer-box-body">
-            <p style="font-size: 14px; color: #475569;">
-                <strong>Für eine Ersteinrichtung wird dies nicht benötigt!</strong><br>
-                Lädt die aktuelle Netzwerk-Identität (PAN, ExtPAN, Kanal, NWK-Key, Live-Frame-Counter, Device-Tabelle) und das vollständige rohe NVRAM als eine <code>coordinator_backup.json</code> im Zigbee Alliance Universal NWK Backup-Format herunter. Identisches Dateiformat wie das von Zigbee2MQTT erzeugte Backup — die Datei kann ins z2m <code>data/</code>-Verzeichnis abgelegt oder auf einen frisch geflashten ESP32-C6 wiederhergestellt werden, um gepaarte Geräte ohne erneutes Anlernen zu migrieren.
-            </p>
+    <div class="info-section">
+        <h3>3. Coordinator (bereits geflasht) — Identify, Backup, Restore</h3>
+        <p style="font-size: 14px; color: #475569; margin: 6px 0 0 0;">
+            Für einen Stick mit bereits installierter Firmware: über USB anschließen und <strong>Identify</strong> klicken, um Live-Netzwerk-Status, Firmware-Version, IEEE-Adresse und Anzahl gepairter Geräte abzurufen. Darunter kann das Netzwerk als Z2M-kompatible <code>coordinator_backup.json</code> gesichert oder aus einer Datei wiederhergestellt werden — und falls die Firmware veraltet oder der Chip Factory-fresh ist, lässt sich die aktuelle Firmware direkt flashen.
+        </p>
 
-            <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
-                <strong>⚠️ Hinweis zu veralteten Snapshots</strong><br>
-                Das Wiederherstellen eines sehr alten Snapshots kann bei einzelnen Geräten weiterhin den Replay-Schutz auslösen, wenn der Frame-Counter über die Luft inzwischen weit über den gespeicherten Wert hinaus läuft. Das Backup erfasst den Live-Counter zum Backup-Zeitpunkt — sicherer Weg bleibt aber: vor jeder Hardware-Migration einen frischen Snapshot ziehen.
-            </div>
-
-            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px; flex-wrap: wrap;">
-                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Backup herunterladen (JSON)</button>
-                <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
-                    <span id="restoreText">1. Backup-Datei wählen</span>
-                    <input type="file" id="restoreFile" accept=".json,.bin,application/json" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. Datei gewählt!';">
-                </label>
-                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Auf ESP32 wiederherstellen</button>
-            </div>
-            <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
-            <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
+        <div class="info-actions">
+            <button class="btn-primary" onclick="identifyCoordinator()">Identify connected device</button>
         </div>
-    </details>
+
+        <div id="info-card">
+            <div class="label">Firmware</div>      <div class="value" id="info-fw">—</div>
+            <div class="label">NCP</div>           <div class="value" id="info-coord">—</div>
+            <div class="label">Stack / Protocol</div>  <div class="value" id="info-stack">—</div>
+            <div class="label">IEEE</div>          <div class="value" id="info-ieee">—</div>
+            <div class="label">Rolle</div>         <div class="value" id="info-role">—</div>
+            <div class="label">Netzwerk</div>      <div class="value" id="info-joined">—</div>
+            <div class="label">PAN ID</div>        <div class="value" id="info-pan">—</div>
+            <div class="label">Ext PAN ID</div>    <div class="value" id="info-extpan">—</div>
+            <div class="label">Kanal</div>         <div class="value" id="info-channel">—</div>
+            <div class="label">Gepairte Geräte</div><div class="value" id="info-devices">—</div>
+            <div class="label">Frame Counter</div> <div class="value" id="info-fc">—</div>
+        </div>
+
+        <div id="info-status-line"></div>
+
+        <div id="info-flash-wrap">
+            <esp-web-install-button manifest="manifest.json">
+                <button slot="activate" id="info-flash-btn" class="btn-success" style="padding: 10px 18px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px; color: white;">Aktuelle Firmware flashen</button>
+            </esp-web-install-button>
+        </div>
+
+        <div class="info-actions">
+            <button class="btn-primary" onclick="doBackup()">Backup herunterladen (JSON)</button>
+            <label class="btn-secondary" id="restoreLabel">
+                <span id="restoreText">Backup-Datei wählen</span>
+                <input type="file" id="restoreFile" accept=".json,.bin,application/json" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='Datei gewählt';">
+            </label>
+            <button class="btn-danger" onclick="doRestore()">Auf ESP32 wiederherstellen</button>
+        </div>
+
+        <div style="background: #fef2f2; color: #991b1b; padding: 8px 12px; border-radius: 4px; font-size: 13px; margin-top: 12px; border-left: 4px solid #ef4444;">
+            <strong>⚠️ Veraltete Snapshots</strong> können bei einzelnen Endgeräten den Replay-Schutz auslösen, wenn deren Frame-Counter über die Luft den gespeicherten Wert überholt hat. Vor jeder Hardware-Migration einen frischen Snapshot ziehen.
+        </div>
+
+        <div id="progress" style="margin-top: 12px; font-weight: bold; display: none; color: var(--primary);"></div>
+        <pre id="log" style="margin-top: 12px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>
+    </div>
+</div>
+
+<div id="reboot-modal">
+    <div class="reboot-modal-card">
+        <h3 id="reboot-modal-title">Chip startet neu…</h3>
+        <p id="reboot-modal-msg">Warte bis der ESP32-C6 über USB neu erkannt wurde.</p>
+        <div class="reboot-spinner" id="reboot-modal-spinner"></div>
+        <div id="reboot-modal-countdown">…</div>
+        <div id="reboot-modal-button-wrap" style="display: none; margin-top: 8px;">
+            <button onclick="modalRefreshAndIdentify()" class="btn-success" style="padding: 10px 22px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px; color: white;">Jetzt aktualisieren</button>
+        </div>
+    </div>
 </div>
 
 <script src="zboss_backup.js"></script>

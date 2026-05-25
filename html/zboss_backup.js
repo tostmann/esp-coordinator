@@ -37,9 +37,19 @@ class ZbossSerial {
         this.port = port;
         this.log = logger;
         this.seq = 0;
+        // Sequential TSN counter (cycles 1..255..0..1..). Starting at 1 keeps
+        // tsn=0 out of the very first request, which some firmwares treat as
+        // a "no-tsn" sentinel. Sequential beats Math.random() because the
+        // birthday-paradox collision rate over a 320-chunk backup is ~36% with
+        // random — sequential only ever wraps once and the wrapped slot is
+        // already retired by then.
+        this.nextTsn = 1;
         this.reader = null;
         this.writer = null;
         this.buffer = new Uint8Array(0);
+        // pendingRequests[tsn] = { cmdId, resolve, timer }. Storing cmdId
+        // lets processBuffer reject unsolicited INDICATION frames that
+        // happen to land on the same tsn but carry a different cmdId.
         this.pendingRequests = {};
         this.running = false;
         this.writeLock = Promise.resolve();
@@ -47,18 +57,40 @@ class ZbossSerial {
 
     async connect() {
         await this.port.open({ baudRate: 115200 });
+        // ESP32-C6 USB-Serial-JTAG can interpret certain default DTR/RTS line
+        // states asserted by the host at open() time as a reset request. Force
+        // both lines low immediately so we don't reboot the chip mid-session
+        // (especially nasty during the post-restore auto-identify, where the
+        // chip is already in early-boot and a second reset triggers Break-
+        // receive on the read stream).
+        try {
+            await this.port.setSignals({ dataTerminalReady: false, requestToSend: false });
+        } catch (e) { /* setSignals unsupported — keep going */ }
         this.writer = this.port.writable.getWriter();
         this.reader = this.port.readable.getReader();
         this.running = true;
+        this.closed = false;
         this.readLoop();
         this.log("Connected to ESP32-C6.");
     }
 
     async disconnect() {
+        // Idempotent: safe to call multiple times. Without this, a readLoop
+        // that died from a transient Break leaves the port handle in 'open'
+        // state — the next port.open() then rejects with InvalidStateError.
+        if (this.closed) return;
+        this.closed = true;
         this.running = false;
-        if (this.reader) await this.reader.cancel();
-        if (this.writer) this.writer.releaseLock();
-        await this.port.close();
+        // Reject any still-pending requests so callers don't hang on the
+        // 5 s timeout when we already know the link is gone.
+        for (const tsn in this.pendingRequests) {
+            const slot = this.pendingRequests[tsn];
+            try { clearTimeout(slot.timer); } catch (e) {}
+        }
+        this.pendingRequests = {};
+        try { if (this.reader) await this.reader.cancel(); } catch (e) {}
+        try { if (this.writer) this.writer.releaseLock(); } catch (e) {}
+        try { await this.port.close(); } catch (e) {}
         this.log("Disconnected.");
     }
 
@@ -78,6 +110,11 @@ class ZbossSerial {
                 if (this.running) this.log("Read error: " + e.message);
                 break;
             }
+        }
+        // Loop terminated — proactively close the port so it doesn't leak
+        // into a stuck 'open' state. Subsequent re-opens then succeed.
+        if (!this.closed) {
+            await this.disconnect();
         }
     }
 
@@ -109,14 +146,24 @@ class ZbossSerial {
 
             if (packet_len > 5) {
                 const payload = frame.slice(9); // Skip header and crc16
-                // Send ACK back
+                // ACK every received frame regardless of whether we route it
+                // — the chip's flow control depends on us acknowledging.
                 this.sendAck(this.recvSeq);
 
-                // Assuming it's a response
                 const cmdId = payload[2] | (payload[3] << 8);
                 const tsn = payload[4];
-                if (this.pendingRequests[tsn]) {
-                    this.pendingRequests[tsn](payload.slice(5));
+                const slot = this.pendingRequests[tsn];
+                // Two-key match: tsn + cmdId. The chip can emit unsolicited
+                // INDICATION frames (APSDE/ZDP, especially while a network is
+                // up and routers/end-devices are still on air) that carry
+                // their own tsn — without the cmdId check, an INDICATION
+                // whose tsn happens to collide with our pending request
+                // would resolve that promise with garbage. The chip's actual
+                // response (with the same tsn, but matching cmdId) would
+                // then arrive too late and get dropped.
+                if (slot && slot.cmdId === cmdId) {
+                    clearTimeout(slot.timer);
+                    slot.resolve(payload.slice(5));
                     delete this.pendingRequests[tsn];
                 }
             }
@@ -134,7 +181,8 @@ class ZbossSerial {
     }
 
     async sendCommand(cmdId, payload) {
-        const tsn = Math.floor(Math.random() * 255);
+        const tsn = this.nextTsn;
+        this.nextTsn = (this.nextTsn + 1) & 0xFF;
         const dataLen = 5 + payload.length; // version, type, cmdId(2), tsn, payload
         const reqData = new Uint8Array(dataLen);
         reqData[0] = 0; // version
@@ -159,11 +207,8 @@ class ZbossSerial {
         this.seq = (this.seq + 1) & 0x03;
 
         return new Promise(async (resolve, reject) => {
-            const timeout = setTimeout(() => { delete this.pendingRequests[tsn]; reject("Timeout"); }, 5000);
-            this.pendingRequests[tsn] = (responsePayload) => {
-                clearTimeout(timeout);
-                resolve(responsePayload);
-            };
+            const timer = setTimeout(() => { delete this.pendingRequests[tsn]; reject("Timeout (cmd=0x" + cmdId.toString(16) + " tsn=" + tsn + ")"); }, 5000);
+            this.pendingRequests[tsn] = { cmdId, resolve, timer };
             this.writeLock = this.writeLock.then(() => this.writer.write(out)).catch(e => this.log(e));
             await this.writeLock;
         });
@@ -248,6 +293,330 @@ function parseStructuredTLVs(payload) {
         }
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Identify — pulls a set of read-only getters and populates the
+// "Coordinator Info" card. Non-destructive; safe to call on a live coord.
+//
+// Wire-format reference (from main/commands_impl.h):
+//   GET_MODULE_VERSION       (0x0001) resp: 3 x uint32 LE
+//                                    fwVersion is firmware-encoded as
+//                                    (MAJOR<<24)|(MINOR<<16)|(BUILD & 0xFFFF)
+//                                    — note BUILD is 16-bit, NOT split into
+//                                    revision/commit bytes the way herdsman's
+//                                    generic ver2str() decodes it.
+//   GET_COORDINATOR_VERSION  (0x0024) resp: uint8
+//   GET_LOCAL_IEEE_ADDR      (0x000b) req: uint8 (mac index, =0); resp: uint8 + 8B IEEE
+//   GET_ZIGBEE_ROLE          (0x0004) resp: uint8 (0=coord, 1=router, 2=ed, 3=none)
+//   GET_JOINED               (0x0014) resp: uint8 (0/1)
+//   GET_PAN_ID               (0x0009) resp: uint16 LE
+//   GET_EXTENDED_PAN_ID      (0x0023) resp: 8B (firmware-reversed to match wire)
+//   GET_ZIGBEE_CHANNEL       (0x0008) resp: uint8 page + uint8 channel
+//   GET_STRUCTURED_BACKUP    (0x009B) — for device count + live frame counter
+// GET_TX_POWER (0x0010) is commented out in commands_impl.h — returns
+// NOT_IMPLEMENTED, so we skip it.
+// ---------------------------------------------------------------------------
+
+const ROLE_NAMES = { 0: "Coordinator", 1: "Router", 2: "End device", 3: "None" };
+
+function formatIEEE(bytes /* Uint8Array(8) */) {
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(':');
+}
+
+function formatFwVersion(u32) {
+    const major = (u32 >>> 24) & 0xff;
+    const minor = (u32 >>> 16) & 0xff;
+    const build = u32 & 0xffff;
+    return `v${major}.${minor}.${build}`;
+}
+
+function formatStackVersion(u32) {
+    const a = (u32 >>> 24) & 0xff;
+    const b = (u32 >>> 16) & 0xff;
+    const c = (u32 >>> 8) & 0xff;
+    const d = u32 & 0xff;
+    return `${a}.${b}.${c}.${d}`;
+}
+
+function parseSemverV(s) {
+    // Accepts "v1.2.32" or "1.2.32", returns [major, minor, build] or null.
+    const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(s || '');
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function compareSemver(a, b) {
+    for (let i = 0; i < 3; i++) {
+        if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+// Modal helpers — used to show a friendly waiting overlay during the
+// post-restore window when the chip is rebooting.
+
+function showRebootModal(title, msg) {
+    const m = document.getElementById('reboot-modal');
+    if (!m) return;
+    const t = document.getElementById('reboot-modal-title');
+    const x = document.getElementById('reboot-modal-msg');
+    const c = document.getElementById('reboot-modal-countdown');
+    if (t) t.textContent = title || 'Chip is rebooting…';
+    if (x) x.textContent = msg || 'Please wait — re-enumerating over USB.';
+    if (c) c.textContent = '';
+    m.style.display = 'flex';
+}
+function setRebootModalCountdown(secondsLeft) {
+    const c = document.getElementById('reboot-modal-countdown');
+    if (c) c.textContent = secondsLeft > 0 ? `${secondsLeft}s` : '…';
+}
+function hideRebootModal() {
+    const m = document.getElementById('reboot-modal');
+    if (m) m.style.display = 'none';
+    const cd = document.getElementById('reboot-modal-countdown');
+    if (cd) cd.style.display = '';
+    const sp = document.getElementById('reboot-modal-spinner');
+    if (sp) sp.style.display = '';
+    const btn = document.getElementById('reboot-modal-button-wrap');
+    if (btn) btn.style.display = 'none';
+}
+// Switch the modal from countdown mode into "ready, click to refresh" mode.
+function showRebootModalReady() {
+    const t = document.getElementById('reboot-modal-title');
+    const x = document.getElementById('reboot-modal-msg');
+    const cd = document.getElementById('reboot-modal-countdown');
+    const sp = document.getElementById('reboot-modal-spinner');
+    const btnWrap = document.getElementById('reboot-modal-button-wrap');
+    if (t) t.textContent = 'Chip should be ready';
+    if (x) x.textContent = 'Click Refresh to re-read the network state from the freshly-restored ESP32-C6.';
+    if (cd) cd.style.display = 'none';
+    if (sp) sp.style.display = 'none';
+    if (btnWrap) btnWrap.style.display = 'block';
+}
+async function modalRefreshAndIdentify() {
+    hideRebootModal();
+    await identifyCoordinator();
+}
+async function waitWithCountdown(seconds, title, msg) {
+    showRebootModal(title, msg);
+    for (let s = seconds; s > 0; s--) {
+        setRebootModalCountdown(s);
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    setRebootModalCountdown(0);
+}
+
+// Hard wall-clock timeout around an arbitrary promise. WebSerial port.open()
+// is documented to be able to hang indefinitely on some Chrome+Linux+ESP32-C6
+// combinations after the chip's USB-Serial-JTAG re-enumerated. Without an
+// outer guard the modal countdown finishes but the identify attempt that
+// follows never resolves nor rejects — the modal stays on screen forever.
+function withTimeout(promise, ms, label) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(
+            () => reject(new Error(`${label} timed out after ${ms / 1000}s`)),
+            ms
+        )),
+    ]);
+}
+
+// Identify helpers — extracted so both the user-triggered identifyCoordinator()
+// and the post-restore auto-refresh can reuse them.
+
+function _resetInfoCard() {
+    const setField = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    ['info-fw', 'info-coord', 'info-stack', 'info-ieee', 'info-role',
+     'info-joined', 'info-pan', 'info-extpan', 'info-channel',
+     'info-devices', 'info-fc'].forEach(id => setField(id, '—'));
+    const statusEl = document.getElementById('info-status-line');
+    if (statusEl) { statusEl.style.display = 'none'; statusEl.className = ''; statusEl.innerHTML = ''; }
+    const flashWrap = document.getElementById('info-flash-wrap');
+    if (flashWrap) flashWrap.style.display = 'none';
+    const card = document.getElementById('info-card');
+    if (card) card.style.display = 'grid';
+}
+
+// Outer retry — Chrome WebSerial on Linux + ESP32-C6 USB-Serial-JTAG very
+// reliably emits a transient Break-receive on the FIRST port.open() after the
+// chip's USB phy re-enumerated (i.e. after esp_restart from RESTORE_NETWORK
+// or just a fresh USB plug). The second attempt always works cleanly. So we
+// try once, and on failure auto-retry once after a short settle delay — the
+// user only sees one logical Identify operation.
+async function _identifyOnPort(port, logger) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        if (attempt > 1) {
+            logger("First attempt hit a transient USB break — retrying in 1s…");
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        const ok = await _identifyOnPortSingle(port, logger);
+        if (ok) return true;
+    }
+    return false;
+}
+
+async function _identifyOnPortSingle(port, logger) {
+    const setField = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    const showStatus = (cls, html) => {
+        const el = document.getElementById('info-status-line');
+        if (!el) return;
+        el.className = cls;
+        el.innerHTML = html;
+        el.style.display = 'block';
+    };
+    const showFlashAction = (label) => {
+        const wrap = document.getElementById('info-flash-wrap');
+        const btn = document.getElementById('info-flash-btn');
+        if (wrap && btn) {
+            btn.textContent = label;
+            wrap.style.display = 'block';
+        }
+    };
+
+    let identifiedFw = null;
+    let zboss = null;
+    let ok = false;
+    try {
+        zboss = new ZbossSerial(port, logger);
+        await zboss.connect();
+
+        logger("Identifying coordinator…");
+
+        // Module version — 12 B payload after status (cat+stat at [0..1]).
+        const r1 = await zboss.sendCommand(0x0001 /* GET_MODULE_VERSION */, new Uint8Array(0));
+        if (r1[1] !== 0) throw new Error("GET_MODULE_VERSION failed");
+        const dv1 = new DataView(r1.buffer, r1.byteOffset);
+        const fwVer = dv1.getUint32(2, true);
+        const stackVer = dv1.getUint32(6, true);
+        const protoVer = dv1.getUint32(10, true);
+        identifiedFw = formatFwVersion(fwVer);
+        ok = true;
+        setField('info-fw', identifiedFw);
+        setField('info-stack', `ZBOSS ${formatStackVersion(stackVer)} · Protocol ${formatStackVersion(protoVer)}`);
+
+        // Coordinator version (single uint8).
+        const r2 = await zboss.sendCommand(0x0024 /* GET_COORDINATOR_VERSION */, new Uint8Array(0));
+        if (r2[1] === 0) setField('info-coord', `busware.de ESP32 (ZBOSS) · NCP rev ${r2[2]}`);
+
+        // Local IEEE — arg=0 (primary mac).
+        const r3 = await zboss.sendCommand(0x000b /* GET_LOCAL_IEEE_ADDR */, new Uint8Array([0]));
+        if (r3[1] === 0) setField('info-ieee', formatIEEE(r3.slice(3, 11)));
+
+        // Role.
+        const r4 = await zboss.sendCommand(0x0004 /* GET_ZIGBEE_ROLE */, new Uint8Array(0));
+        if (r4[1] === 0) setField('info-role', ROLE_NAMES[r4[2]] || ("Unknown(" + r4[2] + ")"));
+
+        // Joined — informational only. The chip can return joined=0 during
+        // the boot-phase window between NVRAM-load and BDB-reattach, even
+        // though the NIB already has live values. So we don't gate the other
+        // queries on this — try them all unconditionally below.
+        const r5 = await zboss.sendCommand(0x0014 /* GET_JOINED */, new Uint8Array(0));
+        const joined = (r5[1] === 0 && r5[2] === 1);
+        setField('info-joined', joined ? 'Joined' : 'Not joined');
+
+        // PAN (uint16 LE).
+        try {
+            const r6 = await zboss.sendCommand(0x0009 /* GET_PAN_ID */, new Uint8Array(0));
+            if (r6[1] === 0) {
+                const pan = r6[2] | (r6[3] << 8);
+                setField('info-pan', pan === 0xFFFF ? '— (no network)' : '0x' + pan.toString(16).padStart(4, '0'));
+            }
+        } catch (e) { logger("GET_PAN_ID failed: " + e); }
+
+        // Extended PAN (8 bytes, firmware-reversed to canonical hex order).
+        try {
+            const r7 = await zboss.sendCommand(0x0023 /* GET_EXTENDED_PAN_ID */, new Uint8Array(0));
+            if (r7[1] === 0) {
+                const allZero = r7.slice(2, 10).every(b => b === 0);
+                const allFF   = r7.slice(2, 10).every(b => b === 0xFF);
+                setField('info-extpan', (allZero || allFF) ? '— (no network)' : formatIEEE(r7.slice(2, 10)));
+            }
+        } catch (e) { logger("GET_EXTENDED_PAN_ID failed: " + e); }
+
+        // Channel (page + channel).
+        try {
+            const r8 = await zboss.sendCommand(0x0008 /* GET_ZIGBEE_CHANNEL */, new Uint8Array(0));
+            if (r8[1] === 0) setField('info-channel', r8[3] === 0xFF ? '— (no network)' : `${r8[3]} (page ${r8[2]})`);
+        } catch (e) { logger("GET_ZIGBEE_CHANNEL failed: " + e); }
+
+        // Structured backup — gives device count + live frame counter.
+        try {
+            const r9 = await zboss.sendCommand(0x009B /* GET_STRUCTURED_BACKUP */, new Uint8Array(0));
+            const s = parseStructuredTLVs(r9);
+            setField('info-devices', `${s.devices.length} paired`);
+            setField('info-fc', s.frame_counter != null ? String(s.frame_counter) : '—');
+        } catch (e) {
+            logger("GET_STRUCTURED_BACKUP failed: " + e);
+        }
+
+        await zboss.disconnect();
+        logger("Identify done.");
+
+        // Compare against manifest.json's latest version + give the user
+        // a contextual next-step recommendation.
+        try {
+            const m = await fetch("manifest.json", { cache: "no-store" });
+            const mj = await m.json();
+            const latest = mj.version || "";
+            const latestSem = parseSemverV(latest);
+            const haveSem = parseSemverV(identifiedFw);
+            // "Has network state worth preserving" — not the GET_JOINED flag
+            // (which can be stale during boot) but the actual PAN field. If
+            // PAN shows a real value (not '— (no network)'), we treat the
+            // chip as carrying a paired network.
+            const panEl = document.getElementById('info-pan');
+            const hasNetwork = panEl && panEl.textContent.startsWith('0x');
+
+            if (latestSem && haveSem) {
+                const cmp = compareSemver(haveSem, latestSem);
+                if (cmp >= 0) {
+                    showStatus('uptodate',
+                        `✓ Firmware is up to date (${latest}).` +
+                        (hasNetwork ? ' This chip carries a paired network — take a backup before any reflash.' : ''));
+                } else {
+                    showStatus('outdated',
+                        `ℹ Newer firmware available: ${latest} (you have ${identifiedFw}).` +
+                        (hasNetwork
+                            ? ' <strong>Take a backup first</strong>, then flash, then restore.'
+                            : ' This chip is not on a network — safe to flash directly.'));
+                    showFlashAction(`Update firmware to ${latest}`);
+                }
+            } else {
+                showStatus('uptodate', `Firmware: ${identifiedFw}. Latest available: ${latest || '(unknown)'}.`);
+            }
+        } catch (e) {
+            // manifest fetch failed — silently skip the version comparison.
+        }
+    } catch (e) {
+        logger("Identify error: " + e);
+        // If the chip didn't respond at all, treat it as a factory candidate
+        // and offer a clean flash path.
+        if (!identifiedFw) {
+            showStatus('factory',
+                'ℹ The connected device did not respond to NCP queries. ' +
+                'This usually means it is either factory-fresh or running a different firmware.');
+            showFlashAction('Flash factory firmware');
+        }
+    } finally {
+        // Always release the port. ZbossSerial.disconnect() is idempotent —
+        // safe even if readLoop already closed it on a Break-receive.
+        if (zboss) {
+            try { await zboss.disconnect(); } catch (e) {}
+        }
+    }
+    return ok;
+}
+
+async function identifyCoordinator() {
+    const logger = (msg) => document.getElementById('log').innerText += msg + '\n';
+    let port;
+    try {
+        port = await navigator.serial.requestPort();
+    } catch (e) {
+        logger("Error: " + e);
+        return;
+    }
+    _resetInfoCard();
+    await _identifyOnPort(port, logger);
 }
 
 async function doBackup() {
@@ -417,10 +786,29 @@ async function doRestore() {
 
         logger("Restore complete! The ESP32 is rebooting.");
         await zboss.disconnect();
+
+        // Two-phase reboot-wait modal:
+        //   1) Countdown 10 s while the chip's USB-Serial-JTAG detaches + ROM
+        //      reboot + ZBOSS stack init runs. The user can see progress.
+        //   2) Replace the countdown with a "Refresh" button. Click it and
+        //      identifyCoordinator() runs against a freshly user-gestured
+        //      requestPort() — same code path that manual Identify uses,
+        //      which is what reliably works post-reboot. (Auto-retry via the
+        //      same SerialPort reference is fragile because Chrome WebSerial's
+        //      port.open() can hang for tens of seconds after the underlying
+        //      OS device went away + came back, even with everything closed
+        //      on our side. The user gesture sidesteps that.)
+        progress.innerText = '';
+        _resetInfoCard();
+        await waitWithCountdown(10, 'Chip is rebooting…', 'Waiting for the ESP32-C6 to re-enumerate over USB. When the countdown ends, click "Refresh now" to read the new network state.');
+        showRebootModalReady();
     } catch (e) {
         logger("Error: " + e);
+        hideRebootModal();
     }
 }
 
 window.doBackup = doBackup;
 window.doRestore = doRestore;
+window.identifyCoordinator = identifyCoordinator;
+window.modalRefreshAndIdentify = modalRefreshAndIdentify;
