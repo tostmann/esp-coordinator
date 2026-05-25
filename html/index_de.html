@@ -262,25 +262,25 @@ advanced:
     </div>
 
     <details class="transfer-box">
-        <summary>3. Network Transfer Image (Fortgeschritten, optional)</summary>
+        <summary>3. Coordinator-Backup (Z2M-kompatibel)</summary>
         <div class="transfer-box-body">
             <p style="font-size: 14px; color: #475569;">
                 <strong>Für eine Ersteinrichtung wird dies nicht benötigt!</strong><br>
-                Nutze dieses Tool, um ein bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterzuladen und auf einen neuen ESP32-C6 zu übertragen. Seit v1.2.x enthält das Abbild zusätzlich die Netzwerk-Identität als inspizierbare strukturierte Felder (PAN, ExtPAN, Kanal, NWK-Key, Frame-Counter, Device-Tabelle) im Zigbee Alliance Universal NWK Backup JSON-Format — neben dem rohen NVRAM-Blob für den byte-genauen Restore.
+                Lädt die aktuelle Netzwerk-Identität (PAN, ExtPAN, Kanal, NWK-Key, Live-Frame-Counter, Device-Tabelle) und das vollständige rohe NVRAM als eine <code>coordinator_backup.json</code> im Zigbee Alliance Universal NWK Backup-Format herunter. Identisches Dateiformat wie das von Zigbee2MQTT erzeugte Backup — die Datei kann ins z2m <code>data/</code>-Verzeichnis abgelegt oder auf einen frisch geflashten ESP32-C6 wiederhergestellt werden, um gepaarte Geräte ohne erneutes Anlernen zu migrieren.
             </p>
 
             <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
                 <strong>⚠️ Hinweis zu veralteten Snapshots</strong><br>
-                Das Wiederherstellen eines sehr alten Snapshots kann bei einzelnen Geräten weiterhin den Replay-Schutz auslösen, wenn der Frame-Counter über die Luft inzwischen weit über den gespeicherten Wert hinaus läuft. v1.2.x erfasst den Live-Counter zum Backup-Zeitpunkt und macht das deutlich unwahrscheinlicher als in älteren Versionen — sicherer Weg bleibt aber: vor jeder Hardware-Migration einen frischen Snapshot ziehen.
+                Das Wiederherstellen eines sehr alten Snapshots kann bei einzelnen Geräten weiterhin den Replay-Schutz auslösen, wenn der Frame-Counter über die Luft inzwischen weit über den gespeicherten Wert hinaus läuft. Das Backup erfasst den Live-Counter zum Backup-Zeitpunkt — sicherer Weg bleibt aber: vor jeder Hardware-Migration einen frischen Snapshot ziehen.
             </div>
 
-            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
-                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Transfer Image Herunterladen</button>
+            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px; flex-wrap: wrap;">
+                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Backup herunterladen (JSON)</button>
                 <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
-                    <span id="restoreText">1. Datei wählen</span>
-                    <input type="file" id="restoreFile" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. Datei gewählt!';">
+                    <span id="restoreText">1. Backup-Datei wählen</span>
+                    <input type="file" id="restoreFile" accept=".json,.bin,application/json" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. Datei gewählt!';">
                 </label>
-                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Auf ESP32 flashen</button>
+                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Auf ESP32 wiederherstellen</button>
             </div>
             <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
             <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>

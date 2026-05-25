@@ -265,25 +265,25 @@ advanced:
     </div>
 
     <details class="transfer-box">
-        <summary>3. Network Transfer Image (Advanced, optional)</summary>
+        <summary>3. Coordinator Backup (Z2M-compatible)</summary>
         <div class="transfer-box-body">
             <p style="font-size: 14px; color: #475569;">
                 <strong>You do not need to do this for a new setup!</strong><br>
-                Use this tool to extract an existing Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator hardware and transfer it to a new ESP32-C6. Since v1.2.x the image also contains the network identity as inspectable structured fields (PAN, ExtPAN, channel, NWK key, frame counter, device table) in the Zigbee Alliance Universal NWK Backup JSON format, alongside the raw NVRAM blob used for byte-true restore.
+                Download the current network identity (PAN, ExtPAN, channel, NWK key, live frame counter, neighbor table) and the full raw NVRAM as one <code>coordinator_backup.json</code> file in the Zigbee Alliance Universal NWK Backup format. The same file format Zigbee2MQTT writes — you can drop it into your z2m <code>data/</code> directory, or restore it back to a freshly-flashed ESP32-C6 to migrate paired devices without re-pairing.
             </p>
 
             <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
                 <strong>⚠️ Note on stale snapshots</strong><br>
-                Restoring a very old snapshot can still trigger replay-protection rejection on individual devices if their on-air frame counter has advanced far past the captured value. v1.2.x captures the live counter at backup time, which makes this much less likely than in earlier versions — but the safest path is still: take a fresh snapshot before any hardware migration.
+                Restoring a very old snapshot can still trigger replay-protection rejection on individual devices if their on-air frame counter has advanced far past the captured value. Backups capture the live counter at backup time, but the safest path is still: take a fresh snapshot before any hardware migration.
             </div>
 
-            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
-                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Download Transfer Image</button>
+            <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px; flex-wrap: wrap;">
+                <button onclick="doBackup()" style="padding: 10px 15px; background: var(--primary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Download Backup (JSON)</button>
                 <label style="padding: 10px 15px; background: #64748b; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;" id="restoreLabel">
-                    <span id="restoreText">1. Select File</span>
-                    <input type="file" id="restoreFile" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. File Selected!';">
+                    <span id="restoreText">1. Select backup file</span>
+                    <input type="file" id="restoreFile" accept=".json,.bin,application/json" style="display: none;" onchange="document.getElementById('restoreLabel').style.background='var(--success)'; document.getElementById('restoreText').innerText='1. File selected!';">
                 </label>
-                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Transfer to ESP32</button>
+                <button onclick="doRestore()" style="padding: 10px 15px; background: var(--danger); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">2. Restore to ESP32</button>
             </div>
             <div id="progress" style="margin-top: 15px; font-weight: bold; display: none; color: var(--primary);">Progress: 0%</div>
             <pre id="log" style="margin-top: 15px; text-align: left; background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 150px; overflow-y: auto; white-space: pre-wrap;"></pre>

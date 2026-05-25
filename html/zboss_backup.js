@@ -151,7 +151,7 @@ class ZbossSerial {
         out[4] = 0x06; // type
         out[5] = 0xC0 | ((this.seq & 0x03) << 2) | (((this.recvSeq || 0) & 0x03) << 4);
         out[6] = crc8(out.slice(2, 6));
-        
+
         const crc = crc16(reqData);
         out[7] = crc & 0xFF; out[8] = (crc >> 8) & 0xFF;
         out.set(reqData, 9);
@@ -170,53 +170,179 @@ class ZbossSerial {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Universal NWK Backup helpers — produce the same coordinator_backup.json
+// shape that the Z2M-fork's zigbee-herdsman adapter:zboss writes, so the file
+// is interchangeable between web-flasher backups and Z2M backups.
+//
+// Wire formats:
+//  - GET_STRUCTURED_BACKUP (0x009B) response payload (after cmdHdr):
+//        category(1) status(1) magic(4 LE) version(1) flags(1) payload_len(2 LE) tlvs[payload_len]
+//    Magic = 'ZBSB' = 0x4253425A. TLVs: tag(1) length(2 LE) value(length).
+//    Tags: 0x01 pan_id(u16 LE), 0x02 ext_pan_id(8B), 0x03 channel(u8),
+//          0x04 nwk_update_id(u8), 0x05 coordinator_ieee(8B), 0x06 nwk_key(16B),
+//          0x07 nwk_key_seq(u8), 0x08 frame_counter(u32 LE),
+//          0x10 device_table (N x 16B = ieee[8] short[2 LE] flags[1] reserved[5]).
+//  - GET_NETWORK_BACKUP (0x0099) response payload (after cmdHdr):
+//        category(1) status(1) total_size(u32 LE) chunk_length(u32 LE) data[chunk_length]
+// ---------------------------------------------------------------------------
+
+function buf2hex(buf) {
+    return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function buf2base64(buf) {
+    let s = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < buf.length; i += chunk) {
+        s += String.fromCharCode.apply(null, buf.subarray(i, Math.min(i + chunk, buf.length)));
+    }
+    return btoa(s);
+}
+
+function base642buf(s) {
+    const bin = atob(s);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf;
+}
+
+function parseStructuredTLVs(payload) {
+    if (payload[1] !== 0) throw new Error("GET_STRUCTURED_BACKUP failed (status=" + payload[1] + ")");
+    const dv = new DataView(payload.buffer, payload.byteOffset);
+    const magic = dv.getUint32(2, true);
+    if (magic !== 0x4253425A) throw new Error("Bad magic in structured backup (0x" + magic.toString(16) + ")");
+    const version = payload[6];
+    if (version !== 1) throw new Error("Unsupported structured-backup format version: " + version);
+    const payload_len = dv.getUint16(8, true);
+    const tlvs = payload.slice(10, 10 + payload_len);
+
+    const result = { devices: [] };
+    let p = 0;
+    while (p + 3 <= tlvs.length) {
+        const tag = tlvs[p];
+        const tlen = tlvs[p+1] | (tlvs[p+2] << 8);
+        p += 3;
+        const val = tlvs.slice(p, p + tlen);
+        p += tlen;
+        switch (tag) {
+            case 0x01: result.pan_id = val[0] | (val[1] << 8); break;
+            case 0x02: result.extended_pan_id = val; break;
+            case 0x03: result.channel = val[0]; break;
+            case 0x04: result.nwk_update_id = val[0]; break;
+            case 0x05: result.coordinator_ieee = val; break;
+            case 0x06: result.network_key = val; break;
+            case 0x07: result.network_key_seq = val[0]; break;
+            case 0x08: result.frame_counter = new DataView(val.buffer, val.byteOffset, val.byteLength).getUint32(0, true); break;
+            case 0x10: {
+                for (let i = 0; i + 16 <= val.length; i += 16) {
+                    const short = val[i+8] | (val[i+9] << 8);
+                    result.devices.push({
+                        nwk_address: short.toString(16).padStart(4, '0'),
+                        ieee_address: buf2hex(val.slice(i, i + 8)),
+                        is_child: true,
+                    });
+                }
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 async function doBackup() {
     const logger = (msg) => document.getElementById('log').innerText += msg + '\n';
+    const progress = document.getElementById('progress');
     try {
         const port = await navigator.serial.requestPort();
         const zboss = new ZbossSerial(port, logger);
         await zboss.connect();
-        
-        logger("Starting Image Transfer...");
+
+        progress.style.display = 'block';
+        progress.innerText = 'Reading network identity…';
+
+        // Step 1: structured backup (TLV with PAN/ExtPAN/key/frame-counter/devices).
+        // Non-fatal on failure — raw NVRAM below is the authoritative restore source.
+        logger("Requesting structured identity (0x009B)…");
+        let structured = null;
+        try {
+            const r = await zboss.sendCommand(155 /* GET_STRUCTURED_BACKUP */, new Uint8Array(0));
+            structured = parseStructuredTLVs(r);
+            logger(`  pan=0x${(structured.pan_id || 0).toString(16)} ch=${structured.channel} key=${structured.network_key ? 'yes' : 'no'} fc=${structured.frame_counter} devs=${structured.devices.length}`);
+        } catch (e) {
+            logger("  structured-identity unavailable (" + e + "), backup will be raw-only");
+        }
+
+        // Step 2: raw NVRAM (chunked, ~40 KB total).
+        logger("Reading raw NVRAM (chunked)…");
         let offset = 0;
         let totalSize = 0;
-        let chunks = [];
-        
-        document.getElementById('progress').style.display = 'block';
+        const chunks = [];
 
         do {
-            const payload = new Uint8Array([offset & 0xFF, (offset >> 8) & 0xFF, (offset >> 16) & 0xFF, (offset >> 24) & 0xFF]);
+            const payload = new Uint8Array(4);
+            new DataView(payload.buffer).setUint32(0, offset, true);
             const response = await zboss.sendCommand(153 /* GET_NETWORK_BACKUP */, payload);
-            
-            // Response: category(1), status(1), total_size(4), chunk_length(4), data
-            if (response[1] !== 0) throw new Error("Transfer command failed");
-            
-            const dv = new DataView(response.buffer, response.byteOffset);
-            totalSize = dv.getUint32(2, true);
-            const chunkLen = dv.getUint32(6, true);
-            
+            if (response[1] !== 0) throw new Error("GET_NETWORK_BACKUP failed at offset " + offset);
+            const rdv = new DataView(response.buffer, response.byteOffset);
+            totalSize = rdv.getUint32(2, true);
+            const chunkLen = rdv.getUint32(6, true);
             if (chunkLen > 0) {
                 chunks.push(response.slice(10, 10 + chunkLen));
                 offset += chunkLen;
-                document.getElementById('progress').innerText = `Progress: ${Math.round((offset/totalSize)*100)}%`;
+                progress.innerText = `Backup: ${Math.round((offset/totalSize)*100)}%`;
             } else {
                 break;
             }
         } while (offset < totalSize);
 
-        const fullBackup = new Uint8Array(totalSize);
+        const raw = new Uint8Array(totalSize);
         let ptr = 0;
-        for (const c of chunks) { fullBackup.set(c, ptr); ptr += c.length; }
+        for (const c of chunks) { raw.set(c, ptr); ptr += c.length; }
 
         await zboss.disconnect();
-        logger("Transfer finished successfully!");
+        logger(`Backup complete: ${totalSize} bytes raw NVRAM` + (structured ? ` + structured identity` : ``));
 
-        // Trigger download
-        const blob = new Blob([fullBackup], {type: "application/octet-stream"});
+        // Step 3: build the Universal NWK Backup JSON shape (Z2M-compatible).
+        // Hybrid: structured fields for inspection + raw_nvram for byte-true restore.
+        const backup = {
+            metadata: {
+                format: "zigpy/open-coordinator-backup",
+                version: 1,
+                source: "esp-coordinator-webflasher",
+                internal: { date: new Date().toISOString() },
+            },
+            stack_specific: {
+                zboss: { raw_nvram: buf2base64(raw) },
+            },
+        };
+        if (structured) {
+            if (structured.coordinator_ieee) backup.coordinator_ieee = buf2hex(structured.coordinator_ieee);
+            if (structured.pan_id !== undefined) backup.pan_id = structured.pan_id.toString(16).padStart(4, '0');
+            if (structured.extended_pan_id) backup.extended_pan_id = buf2hex(structured.extended_pan_id);
+            if (structured.nwk_update_id !== undefined) backup.nwk_update_id = structured.nwk_update_id;
+            backup.security_level = 5;
+            if (structured.channel !== undefined) {
+                backup.channel = structured.channel;
+                backup.channel_mask = [structured.channel];
+            }
+            if (structured.network_key) {
+                backup.network_key = {
+                    key: buf2hex(structured.network_key),
+                    sequence_number: structured.network_key_seq || 0,
+                    frame_counter: structured.frame_counter || 0,
+                };
+            }
+            backup.devices = structured.devices;
+        }
+
+        const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(blob);
-        link.download = "zboss_network_transfer.bin";
+        const dateStr = new Date().toISOString().slice(0, 10);
+        link.download = `coordinator_backup_${dateStr}.json`;
         link.click();
+        progress.innerText = `Saved: ${link.download}`;
     } catch (e) {
         logger("Error: " + e);
     }
@@ -224,39 +350,58 @@ async function doBackup() {
 
 async function doRestore() {
     const logger = (msg) => document.getElementById('log').innerText += msg + '\n';
+    const progress = document.getElementById('progress');
     const input = document.getElementById('restoreFile');
     if (!input.files || input.files.length === 0) {
         alert("Please select a backup file first!");
         return;
     }
-    
+
     let port;
     try {
-        // Must be called immediately on user action before any other awaits!
+        // Must be called immediately on user action before any other awaits.
         port = await navigator.serial.requestPort();
     } catch (e) {
         logger("Error: " + e);
         return;
     }
-    
+
     const file = input.files[0];
     const buffer = await file.arrayBuffer();
-    const data = new Uint8Array(buffer);
-    const totalSize = data.length;
+    let raw;
 
+    // Auto-detect: Universal NWK Backup JSON (coordinator_backup.json) vs legacy raw .bin.
+    const head = new TextDecoder('utf-8', { fatal: false }).decode(buffer.slice(0, Math.min(buffer.byteLength, 256))).trimStart();
+    if (head.startsWith('{')) {
+        try {
+            const json = JSON.parse(new TextDecoder('utf-8').decode(buffer));
+            const b64 = json && json.stack_specific && json.stack_specific.zboss && json.stack_specific.zboss.raw_nvram;
+            if (!b64) throw new Error("backup JSON has no stack_specific.zboss.raw_nvram");
+            raw = base642buf(b64);
+            logger(`Detected Universal NWK Backup JSON (${raw.length} bytes raw NVRAM` + (json.pan_id ? `, pan=0x${json.pan_id} ch=${json.channel}` : ``) + `)`);
+        } catch (e) {
+            logger("Failed to parse backup JSON: " + (e.message || e));
+            return;
+        }
+    } else {
+        raw = new Uint8Array(buffer);
+        logger(`Detected legacy raw NVRAM binary (${raw.length} bytes)`);
+    }
+
+    const totalSize = raw.length;
     try {
         const zboss = new ZbossSerial(port, logger);
         await zboss.connect();
-        
-        logger("Starting Restore...");
+
+        logger("Starting restore…");
         let offset = 0;
         const chunkSize = 128;
-        document.getElementById('progress').style.display = 'block';
+        progress.style.display = 'block';
 
         while (offset < totalSize) {
             const end = Math.min(offset + chunkSize, totalSize);
-            const chunk = data.slice(offset, end);
-            
+            const chunk = raw.slice(offset, end);
+
             const payload = new Uint8Array(8 + chunk.length);
             const dv = new DataView(payload.buffer);
             dv.setUint32(0, offset, true);
@@ -264,10 +409,10 @@ async function doRestore() {
             payload.set(chunk, 8);
 
             const response = await zboss.sendCommand(154 /* RESTORE_NETWORK */, payload);
-            if (response[1] !== 0) throw new Error("Restore command failed at offset " + offset);
+            if (response[1] !== 0) throw new Error("Restore failed at offset " + offset);
 
             offset += chunk.length;
-            document.getElementById('progress').innerText = `Progress: ${Math.round((offset/totalSize)*100)}%`;
+            progress.innerText = `Restore: ${Math.round((offset/totalSize)*100)}%`;
         }
 
         logger("Restore complete! The ESP32 is rebooting.");
