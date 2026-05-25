@@ -215,8 +215,8 @@
 
     <div class="info-box">
         <strong>Information:</strong>
-        Dieses Tool flasht die Firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> direkt über den Browser auf deinen ESP32-C6. 
-        Der Prozess überprüft automatisch, ob es sich bei dem angeschlossenen Gerät tatsächlich um einen <b>ESP32-C6</b> handelt.
+        Dieses Tool flasht die aktuelle Factory-Firmware (Version siehe oben) direkt über den Browser auf deinen ESP32-C6.
+        Der Prozess überprüft automatisch, dass es sich bei dem angeschlossenen Gerät um einen <b>ESP32-C6</b> handelt.
     </div>
 
     <details class="release-notes" id="release-notes">
@@ -258,7 +258,7 @@ advanced:
         <b>Wichtige Hinweise:</b><br>
         • Die Firmware ist auf maximale Stabilität für das <b>ZBOSS</b> Protokoll optimiert.<br>
         • Wenn Z2M beim Starten "Port is busy" meldet, stellen Sie sicher, dass keine anderen Dienste (wie z.B. ModemManager) den Port blockieren.<br>
-        • ZHA/Zigpy wird offiziell nicht unterstützt; bitte ausschließlich Zigbee2MQTT verwenden.
+        • Zigbee2MQTT ist der empfohlene Host-Stack. Home Assistant ZHA ist experimentell — aktueller Status siehe <a href="https://github.com/tostmann/esp-coordinator#home-assistant-zha-experimental" target="_blank">GitHub README</a>.
     </div>
 
     <details class="transfer-box">
@@ -266,12 +266,12 @@ advanced:
         <div class="transfer-box-body">
             <p style="font-size: 14px; color: #475569;">
                 <strong>Für eine Ersteinrichtung wird dies nicht benötigt!</strong><br>
-                Nutze dieses Tool, um ein bereits bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterzuladen und auf einen neuen ESP32-C6 zu übertragen.
+                Nutze dieses Tool, um ein bestehendes Zigbee-Netzwerk (Frame Counter, Schlüssel, Routen) direkt vom Coordinator herunterzuladen und auf einen neuen ESP32-C6 zu übertragen. Seit v1.2.x enthält das Abbild zusätzlich die Netzwerk-Identität als inspizierbare strukturierte Felder (PAN, ExtPAN, Kanal, NWK-Key, Frame-Counter, Device-Tabelle) im Zigbee Alliance Universal NWK Backup JSON-Format — neben dem rohen NVRAM-Blob für den byte-genauen Restore.
             </p>
 
             <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
-                <strong>⚠️ Warnung: Kein Langzeit-Backup!</strong><br>
-                Dies extrahiert ein rohes Speicherabbild mit exakten Frame Countern. Wenn ein zu altes Abbild wiederhergestellt wird (bei dem die Geräte in der Zwischenzeit viele Nachrichten gesendet haben), werden deine Endgeräte den Coordinator zum Schutz vor Replay-Attacken blockieren und müssen neu angelernt werden. <strong>Nutze diese Funktion primär für einen sofortigen Hardware-Tausch.</strong>
+                <strong>⚠️ Hinweis zu veralteten Snapshots</strong><br>
+                Das Wiederherstellen eines sehr alten Snapshots kann bei einzelnen Geräten weiterhin den Replay-Schutz auslösen, wenn der Frame-Counter über die Luft inzwischen weit über den gespeicherten Wert hinaus läuft. v1.2.x erfasst den Live-Counter zum Backup-Zeitpunkt und macht das deutlich unwahrscheinlicher als in älteren Versionen — sicherer Weg bleibt aber: vor jeder Hardware-Migration einen frischen Snapshot ziehen.
             </div>
 
             <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">

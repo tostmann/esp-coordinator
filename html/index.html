@@ -218,8 +218,8 @@
 
     <div class="info-box">
         <strong>Information:</strong>
-        This tool flashes the firmware <code>esp-coordinator-v1.1.0-esp32c6-factory.bin</code> directly via your browser to your ESP32-C6. 
-        The process automatically verifies if the connected device is actually an <b>ESP32-C6</b>.
+        This tool flashes the latest factory firmware (version shown above) directly via your browser onto your ESP32-C6.
+        The process automatically verifies that the connected device is an <b>ESP32-C6</b>.
     </div>
 
     <details class="release-notes" id="release-notes">
@@ -261,7 +261,7 @@ advanced:
         <b>Important Notes:</b><br>
         • The firmware is optimized for maximum stability using the <b>ZBOSS</b> protocol.<br>
         • If Z2M reports "Port is busy" during startup, ensure no other services (like ModemManager) are blocking the port.<br>
-        • ZHA/Zigpy is officially not supported; please use Zigbee2MQTT exclusively.
+        • Zigbee2MQTT is the recommended host stack. Home Assistant ZHA is experimental — see the <a href="https://github.com/tostmann/esp-coordinator#home-assistant-zha-experimental" target="_blank">GitHub README</a> for current status.
     </div>
 
     <details class="transfer-box">
@@ -269,12 +269,12 @@ advanced:
         <div class="transfer-box-body">
             <p style="font-size: 14px; color: #475569;">
                 <strong>You do not need to do this for a new setup!</strong><br>
-                Use this tool to extract an existing Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator hardware and transfer it to a new ESP32-C6.
+                Use this tool to extract an existing Zigbee network (Frame Counters, Keys, Routes) directly from the coordinator hardware and transfer it to a new ESP32-C6. Since v1.2.x the image also contains the network identity as inspectable structured fields (PAN, ExtPAN, channel, NWK key, frame counter, device table) in the Zigbee Alliance Universal NWK Backup JSON format, alongside the raw NVRAM blob used for byte-true restore.
             </p>
 
             <div style="background: #fef2f2; color: #991b1b; padding: 10px; border-radius: 4px; font-size: 13px; text-align: left; margin-top: 15px; border-left: 4px solid #ef4444;">
-                <strong>⚠️ Warning: Not a long-term "Backup"</strong><br>
-                This extracts a raw memory image containing exact Frame Counters. If you restore an image that is too old (where devices have sent many messages since the image was taken), your devices will reject the coordinator to prevent Replay Attacks and must be re-paired. <strong>Use this primarily for immediate hardware migration.</strong>
+                <strong>⚠️ Note on stale snapshots</strong><br>
+                Restoring a very old snapshot can still trigger replay-protection rejection on individual devices if their on-air frame counter has advanced far past the captured value. v1.2.x captures the live counter at backup time, which makes this much less likely than in earlier versions — but the safest path is still: take a fresh snapshot before any hardware migration.
             </div>
 
             <div style="display: flex; gap: 10px; justify-content: center; margin-top: 15px;">
