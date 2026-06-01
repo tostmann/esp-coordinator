@@ -253,6 +253,13 @@ template <>
 struct zb_ncp::cmd_handle<SET_PAN_ID> : immediate_cmd_process<SET_PAN_ID>,
 		general_status_arg<SET_PAN_ID,uint16_t> {
 	static void process_status_arg(ncp_generic_status_t& status, uint16_t arg) {
+		// GETSET-2: 0xFFFF is the IEEE 802.15.4 unassigned/broadcast PAN ID and is
+		// never a valid operating PAN. Reject it instead of forwarding a value
+		// the stack can't actually run on.
+		if (arg == 0xFFFF) {
+			status = GENERIC_INVALID_PARAMETER_1;
+			return;
+		}
 		zb_set_pan_id(arg);
     }
 };
@@ -323,7 +330,16 @@ template <>
 struct zb_ncp::cmd_handle<SET_TX_POWER> : immediate_cmd_process<SET_TX_POWER>,
 		general_status_arg_res<SET_TX_POWER,uint8_t,uint8_t> {
 	static void process_status_arg_res(ncp_generic_status_t& status, uint8_t arg,uint8_t* res) {
-		zb_set_tx_power(arg);
+		// GETSET-2: the ZBOSS tx-power encoding is not reliably documented
+		// (zboss_api.h labels the uint8 arg "[dBm]" yet its own example passes
+		// 0x32) and the lower IEEE802154 layer is the real authority on the
+		// supported range — so we do NOT impose a fabricated numeric bound.
+		// Instead propagate zb_set_tx_power's own zb_ret_t: a value the stack
+		// rejects now surfaces to the host instead of returning a silent OK.
+		zb_ret_t ret = zb_set_tx_power(arg);
+		if (ret != RET_OK) {
+			status = GENERIC_INVALID_PARAMETER_1;
+		}
 		*res = arg;//zb_get_tx_power();
     }
 };
@@ -430,6 +446,9 @@ struct zb_ncp::cmd_handle<GET_EXTENDED_PAN_ID> : immediate_cmd_process<GET_EXTEN
 		zb_uint8_t ext_pan_id[8];
 		zb_get_extended_pan_id(ext_pan_id);
 
+        // GETSET-3: returned reversed (MSB-first) to match the reference ZBOSS NCP
+        // + herdsman's compensating .reverse(); SET_EXTENDED_PAN_ID mirrors this
+        // so the SET<->GET pair round-trips.
         zb_uint8_t ext_pan_id_reversed[8];
         ext_pan_id_reversed[0] = ext_pan_id[7];
         ext_pan_id_reversed[1] = ext_pan_id[6];
@@ -533,16 +552,25 @@ template <>
 struct zb_ncp::cmd_handle<SET_EXTENDED_PAN_ID> : immediate_cmd_process<SET_EXTENDED_PAN_ID>,
 		general_status_arg<SET_EXTENDED_PAN_ID,zb_ext_pan_id_t> {
 	static void process_status_arg(ncp_generic_status_t& status, const zb_ext_pan_id_t& arg) {
-		// TODO(M2): asymmetric with GET_EXTENDED_PAN_ID — GET reverses 8 bytes
-		// before sending but SET takes them as-is. zigbee-herdsman writes
-		// EXTENDED_PAN_ID as raw 8 bytes (frame.js:18 writeBuffer(value,8))
-		// in both directions, so a host that round-trips SET->GET sees the
-		// ext PAN ID byte-flipped relative to what it sent. Z2M currently
-		// has SET_EXTENDED_PAN_ID commented out (driver.js:201) so the
-		// regression is latent. Decide on a canonical wire byte order
-		// (most likely: drop the reversal in GET to make both raw) once a
-		// hardware round-trip test is possible.
-		zb_set_extended_pan_id(arg);
+		// GETSET-3 (resolved 2026-05-30): mirror GET_EXTENDED_PAN_ID's byte
+		// reversal so SET<->GET round-trips identically (stack = reverse(wire);
+		// GET then returns reverse(stack) == wire). GET's reversal matches the
+		// reference ZBOSS NCP, which zigbee-herdsman compensates for with its own
+		// .reverse() (driver.ts:174); herdsman keeps SET_EXTENDED_PAN_ID commented
+		// out (driver.ts:224), so this only affects a host that actually issues
+		// SET (e.g. a future zigpy-zboss / ZHA path). NOTE: no current host
+		// exercises the firmware SET path — needs a hardware SET->GET round-trip
+		// check before release.
+		zb_uint8_t ext_pan_id_reversed[8];
+		ext_pan_id_reversed[0] = arg[7];
+		ext_pan_id_reversed[1] = arg[6];
+		ext_pan_id_reversed[2] = arg[5];
+		ext_pan_id_reversed[3] = arg[4];
+		ext_pan_id_reversed[4] = arg[3];
+		ext_pan_id_reversed[5] = arg[2];
+		ext_pan_id_reversed[6] = arg[1];
+		ext_pan_id_reversed[7] = arg[0];
+		zb_set_extended_pan_id(ext_pan_id_reversed);
     }
 };
 
@@ -555,6 +583,14 @@ template <>
 struct zb_ncp::cmd_handle<SET_MAX_CHILDREN> : immediate_cmd_process<SET_MAX_CHILDREN>,
 		general_status_arg<SET_MAX_CHILDREN,uint8_t> {
 	static void process_status_arg(ncp_generic_status_t& status, uint8_t arg) {
+		// GETSET-2: the address/child tables are sized for
+		// zb_ncp::OVERALL_NETWORK_SIZE nodes (init_int). A host value above that
+		// can't be honored and oversizing children risks the zb_address.c:395
+		// table-exhaustion assertion family — reject it.
+		if (arg > zb_ncp::OVERALL_NETWORK_SIZE) {
+			status = GENERIC_INVALID_PARAMETER_1;
+			return;
+		}
 		zb_set_max_children(arg);
     }
 };
@@ -646,7 +682,7 @@ struct zb_ncp::cmd_handle<NWK_FORMATION> : delayed_cmd_process<NWK_FORMATION,sin
             uint8_t page = *indata++; --cmdlen;
             if (page != 0) 
                 return GENERIC_INVALID_PARAMETER;
-            auto channel_mask = *reinterpret_cast<const uint32_t*>(indata);
+            uint32_t channel_mask; memcpy(&channel_mask, indata, 4);
             indata+=4; cmdlen-=4;
             ESP_LOGD(TAG,"zb_set_channel_mask: %08lx",channel_mask);
             zb_ncp::set_channel_mask(channel_mask);
@@ -659,7 +695,7 @@ struct zb_ncp::cmd_handle<NWK_FORMATION> : delayed_cmd_process<NWK_FORMATION,sin
         uint8_t distribFlag = *indata++; --cmdlen;
         if (cmdlen < 2)
             return GENERIC_INVALID_PARAMETER;
-        uint16_t distribNwk = *reinterpret_cast<const uint16_t*>(indata);
+        uint16_t distribNwk; memcpy(&distribNwk, indata, 2);
         indata+=2;cmdlen-=2;
         if (cmdlen < sizeof(zb_ext_pan_id_t))
             return GENERIC_INVALID_PARAMETER;
@@ -689,9 +725,9 @@ struct zb_ncp::cmd_handle<NWK_FORMATION> : delayed_cmd_process<NWK_FORMATION,sin
         *outdata++ = STATUS_CATEGORY_NWK;
         *outdata++ = status;
         if (status == 0) {
-            *reinterpret_cast<uint16_t*>(outdata) = zb_get_pan_id();
+            uint16_t pan_id_ = zb_get_pan_id(); memcpy(outdata, &pan_id_, 2);
         } else {
-            *reinterpret_cast<uint16_t*>(outdata) = 0;
+            uint16_t pan_id_ = 0; memcpy(outdata, &pan_id_, 2);
         }
         return 4;
     }
@@ -788,7 +824,7 @@ struct zb_ncp::cmd_handle<ZDO_ACTIVE_EP_REQ> : request_cmd_process< ZDO_ACTIVE_E
             outdata[3+i] = ep_list[i]; ++len;
             ESP_LOGI(TAG,"S_ZDO_ACTIVE_EP_REQ::format_response ep:%d",ep_list[i]);
         }
-        *reinterpret_cast<uint16_t*>(&outdata[3+ep_count]) = resp->nwk_addr;
+        memcpy(&outdata[3+ep_count], &resp->nwk_addr, 2);
         return 3+ep_count+2;
     }
 };
@@ -847,8 +883,8 @@ struct zb_ncp::cmd_handle<ZDO_SIMPLE_DESC_REQ> : request_cmd_process< ZDO_SIMPLE
     	*out++ = STATUS_CATEGORY_ZDO;
     	*out++ = resp->hdr.status;
     	*out++ = resp->simple_desc.endpoint;
-    	*reinterpret_cast<uint16_t*>(out) = resp->simple_desc.app_profile_id; out+=2;
-    	*reinterpret_cast<uint16_t*>(out) = resp->simple_desc.app_device_id; out+=2;
+    	memcpy(out, &resp->simple_desc.app_profile_id, 2); out+=2;
+    	memcpy(out, &resp->simple_desc.app_device_id, 2); out+=2;
     	*out++ = resp->simple_desc.app_device_version;
 
     	auto input_count = resp->simple_desc.app_input_cluster_count;
@@ -862,14 +898,14 @@ struct zb_ncp::cmd_handle<ZDO_SIMPLE_DESC_REQ> : request_cmd_process< ZDO_SIMPLE
     	*out++ = output_count;
 
     	for (uint16_t i=0;i<input_count;++i) {
-    		*reinterpret_cast<uint16_t*>(out) = resp->simple_desc.app_cluster_list[i];
+    		memcpy(out, &resp->simple_desc.app_cluster_list[i], 2);
     		out+=2;
     	}
     	for (uint16_t i=0;i<output_count;++i) {
-    		*reinterpret_cast<uint16_t*>(out) = resp->simple_desc.app_cluster_list[i+resp->simple_desc.app_input_cluster_count];
+    		memcpy(out, &resp->simple_desc.app_cluster_list[i+resp->simple_desc.app_input_cluster_count], 2);
     		out+=2;
     	}
-    	*reinterpret_cast<uint16_t*>(out) = resp->hdr.nwk_addr; out+=2;
+    	memcpy(out, &resp->hdr.nwk_addr, 2); out+=2;
 
         return out-outdata;
     }
@@ -923,7 +959,7 @@ struct zb_ncp::cmd_handle<ZDO_NODE_DESC_REQ> : request_cmd_process< ZDO_NODE_DES
         outdata[0] = STATUS_CATEGORY_ZDO;
         outdata[1] = resp->hdr.status;
         memcpy(&outdata[2],&resp->node_desc,sizeof(zb_af_node_desc_t));
-        *reinterpret_cast<uint16_t*>(&outdata[2+sizeof(zb_af_node_desc_t)]) = resp->hdr.nwk_addr;
+        memcpy(&outdata[2+sizeof(zb_af_node_desc_t)], &resp->hdr.nwk_addr, 2);
         return sizeof(zb_zdo_node_desc_resp_t);
     }
 };
@@ -1068,12 +1104,12 @@ struct zb_ncp::cmd_handle<ZDO_IEEE_ADDR_REQ> : request_cmd_process< ZDO_IEEE_ADD
         	if (num) {
         		auto ext2 = reinterpret_cast<const zb_zdo_ieee_addr_resp_ext2_t*>(ext+1);
         		*dst++ = ext2->start_index; ++outlen;
-        		auto nwks = reinterpret_cast<const uint16_t*>(ext2+1);
+        		auto nwks = reinterpret_cast<const uint8_t*>(ext2+1);
         		// MUST use capped `num`, not ext->num_assoc_dev — the latter is
         		// the untruncated remote-reported count; iterating past `num`
         		// overflows the response stack buffer (additional_buffer_size = 2+16*2).
         		for (uint8_t i=0;i<num;++i) {
-        			*reinterpret_cast<uint16_t*>(dst) = *nwks++;
+        			memcpy(dst, nwks, 2); nwks += 2;  // PROTO-3: ext2+1 and dst can be odd-aligned
         			dst += 2; outlen+=2;
         		}
         	}
@@ -1131,10 +1167,10 @@ struct zb_ncp::cmd_handle<ZDO_NWK_ADDR_REQ> : request_cmd_process< ZDO_NWK_ADDR_
         	if (num) {
         		auto ext2 = reinterpret_cast<const zb_zdo_nwk_addr_resp_ext2_t*>(ext+1);
         		*dst++ = ext2->start_index; ++outlen;
-        		auto nwks = reinterpret_cast<const uint16_t*>(ext2+1);
+        		auto nwks = reinterpret_cast<const uint8_t*>(ext2+1);
         		// MUST use capped `num`, see sibling handler ZDO_IEEE_ADDR_REQ.
         		for (uint8_t i=0;i<num;++i) {
-        			*reinterpret_cast<uint16_t*>(dst) = *nwks++;
+        			memcpy(dst, nwks, 2); nwks += 2;  // PROTO-3: ext2+1 and dst can be odd-aligned
         			dst += 2; outlen+=2;
         		}
         	}
@@ -1163,7 +1199,7 @@ struct zb_ncp::cmd_handle<ZDO_POWER_DESC_REQ> : request_cmd_process< ZDO_POWER_D
         outdata[0] = STATUS_CATEGORY_ZDO;
         outdata[1] = resp->hdr.status;
         memcpy(&outdata[2],&resp->power_desc,sizeof(zb_af_node_power_desc_t));
-        *reinterpret_cast<uint16_t*>(&outdata[2+sizeof(zb_af_node_power_desc_t)]) = resp->hdr.nwk_addr;
+        memcpy(&outdata[2+sizeof(zb_af_node_power_desc_t)], &resp->hdr.nwk_addr, 2);
         return sizeof(zb_zdo_power_desc_resp_t);
     }
    
@@ -1291,7 +1327,7 @@ struct zb_ncp::cmd_handle<ZDO_MATCH_DESC_REQ> : request_cmd_process< ZDO_MATCH_D
         for (uint8_t i=0;i<len;++i) {
         	*out++ = reinterpret_cast<const uint8_t*>(resp+1)[i];
         }
-        *reinterpret_cast<uint16_t*>(out) = resp->nwk_addr; out += 2;
+        memcpy(out, &resp->nwk_addr, 2); out += 2;
         return out - outdata;
     }
    
@@ -1645,7 +1681,12 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
 //         {name: 'dstAddrMode', type: DataType.UINT8},
 
     static void handle_response(ResolveStrategy::request_t& req,const zb_apsde_data_resp_t* resp) {
-    	uint8_t outdata[sizeof(zb_ncp::cmd_t)+8+1+1+4+1];
+    	// C1: worst case = mode-2/3 unicast confirm: cmd_t | category(1) |
+    	// status(1) | ieee(8) | dst_endpoint(1, only for dst_addr_mode 2/3) |
+    	// src_endpoint(1) | tx_time(4) | dst_addr_mode(1). The old size omitted
+    	// category + dst_endpoint -> 1-2 B OOB stack write + leak to the host on
+    	// every APSDE confirm.
+    	uint8_t outdata[sizeof(zb_ncp::cmd_t)+1+1+8+1+1+4+1];
     	zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
         *out_cmd = req.cmd;
         out_cmd->type = zb_ncp::RESPONSE;
@@ -1657,7 +1698,7 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
         	*out++ = resp->dst_endpoint;
         }
         *out++ = resp->src_endpoint;
-        *reinterpret_cast<uint32_t*>(out) = resp->tx_time; out += 4;
+        memcpy(out, &resp->tx_time, 4); out += 4;
         *out++ = resp->dst_addr_mode;
         zb_ncp::send_cmd_data( outdata, out-outdata ); 
     }
@@ -1671,15 +1712,16 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
             	ind->dst_endpoint,ind->src_endpoint,
             	IEEE_ADDR_PRINT(ind->addr),int(ind->dst_addr_mode),int(data_ptr[1]),int(len),data_ptr);
 
-            auto req = ResolveStrategy::resolve(data_ptr[1]);
-            if (req) {
+            // DISP-2: claim+free the slot atomically before the blocking
+            // handle_response/report_failed send. data_ptr[1] is the ZCL TSN.
+            ResolveStrategy::request_t req;
+            if (ResolveStrategy::resolve_take(data_ptr[1], req)) {
             	ESP_LOGD(TAG,"%s::aps_user_payload_callback %d",Cmd::name,int(data_ptr[1]));
 	        	if (ind->status == 0) {
-	        		 Cmd::handle_response(*req,ind);
+	        		 Cmd::handle_response(req,ind);
 	        	} else {
-	        		report_failed(req->cmd,ind->status);
+	        		report_failed(req.cmd,ind->status);
 	        	}
-	        	req->state = ResolveStrategy::request_t::S_NONE;
             } else {
             	ESP_LOGW(TAG,"%s not found request for response %d",Cmd::name,int(data_ptr[1]));
             }
@@ -1730,9 +1772,15 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
 
     	// Req* request_data;
     	auto& req = ResolveStrategy::get_by_index(req_arg);
-    	
 
-    	req.state = ResolveStrategy::request_t::S_EXEC;
+    	// DISP-2: the slot is S_ALLOCATION (reserved by start_resolve), so reading
+    	// req.arg and letting start_request set req.tsn here is safe — no other
+    	// task matches an S_ALLOCATION slot. Publish S_EXEC only AFTER the send so
+    	// a concurrent app-task start_resolve override can't re-pick this slot
+    	// mid-send and tear req.arg out from under start_request. The aps tx
+    	// confirm (aps_user_payload_callback) is a deferred ZBOSS-task callback —
+    	// it runs after do_request returns, never synchronously inside
+    	// start_request — so publishing S_EXEC after the send still races nothing.
         zb_ret_t ret;
     	if (req.arg.hdr.paramLength == 21) {
 			auto& arg = req.arg;
@@ -1743,11 +1791,16 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     	}
     	if (ret != 0) {
     		ESP_LOGE(TAG,"failed zb_aps_send_user_payload %02x",int(ret));
-    		req.state = ResolveStrategy::request_t::S_NONE;
-    		report_failed(req.cmd,ret);
+    		zb_ncp::cmd_t failed_cmd;
+    		{	utils::sem_lock l(request_resolver_mutex());
+    			failed_cmd = req.cmd;
+    			req.state = ResolveStrategy::request_t::S_NONE;
+    		}
+    		report_failed(failed_cmd,ret);
     		return;
     	}
-
+    	utils::sem_lock l(request_resolver_mutex());
+    	req.state = ResolveStrategy::request_t::S_EXEC;
     }
     static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
     	// Smallest acceptable frame: nep header (no dst_endpoint), zero data bytes.
@@ -1900,17 +1953,31 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         memcpy(payload + 4, &len,        4);
 
         if (len > 0) {
+            esp_err_t re = ESP_OK;
             if (offset < nvs_part->size) {
                 uint32_t read_len = len;
                 if (offset + read_len > nvs_part->size) {
                     read_len = nvs_part->size - offset;
                 }
-                esp_partition_read(nvs_part, offset, payload + 8, read_len);
-                if (read_len < len) {
-                    esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
+                re = esp_partition_read(nvs_part, offset, payload + 8, read_len);
+                if (re == ESP_OK && read_len < len) {
+                    re = esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
                 }
             } else {
-                esp_partition_read(zb_part, offset - nvs_part->size, payload + 8, len);
+                re = esp_partition_read(zb_part, offset - nvs_part->size, payload + 8, len);
+            }
+            if (re != ESP_OK) {
+                // Same unchecked-esp_partition_* class as M1, on the backup-READ
+                // side: an unchecked failed read would ship stale stack bytes to
+                // the host as a "valid" chunk with status OK -> silently corrupt
+                // coordinator_backup.json. Report failure with len=0 instead,
+                // mirroring the partitions-missing path above.
+                ESP_LOGE(TAG, "GET_NETWORK_BACKUP: read failed at offset %lu: %s",
+                         (unsigned long)offset, esp_err_to_name(re));
+                full_res->status = GENERIC_OPERATION_FAILED;
+                len = 0;
+                memcpy(payload + 4, &len, 4);
+                return sizeof(generic_response_t) + 8;
             }
         }
 
@@ -1981,8 +2048,17 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
             ESP_LOGI(TAG, "RESTORE_NETWORK: begin, total %lu bytes", (unsigned long)total_size);
             extern esp_err_t nvs_flash_deinit(void);
             nvs_flash_deinit();
-            esp_partition_erase_range(nvs_part, 0, nvs_part->size);
-            esp_partition_erase_range(zb_part,  0, zb_part->size);
+            esp_err_t er_nvs = esp_partition_erase_range(nvs_part, 0, nvs_part->size);
+            esp_err_t er_zb  = esp_partition_erase_range(zb_part,  0, zb_part->size);
+            if (er_nvs != ESP_OK || er_zb != ESP_OK) {
+                // M1: a failed erase leaves NVS half-wiped. Abort the session and
+                // do NOT open it / schedule a reboot — booting on a partially
+                // erased nvs/zb_storage bricks the coordinator.
+                ESP_LOGE(TAG, "RESTORE_NETWORK: erase failed nvs=%s zb=%s",
+                         esp_err_to_name(er_nvs), esp_err_to_name(er_zb));
+                s_restore_session.active = false;
+                return reply(outdata, GENERIC_OPERATION_FAILED);
+            }
             s_restore_session.active      = true;
             s_restore_session.total_size  = total_size;
             s_restore_session.next_offset = 0;
@@ -2001,17 +2077,26 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
 
         // Split the chunk across the nvs/zb_storage boundary if it straddles.
         if (chunk_length > 0) {
+            esp_err_t we = ESP_OK;
             if (offset < nvs_part->size) {
                 uint32_t write_len = chunk_length;
                 if (offset + write_len > nvs_part->size) {
                     write_len = nvs_part->size - offset;
                 }
-                esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
-                if (write_len < chunk_length) {
-                    esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
+                we = esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
+                if (we == ESP_OK && write_len < chunk_length) {
+                    we = esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
                 }
             } else {
-                esp_partition_write(zb_part, offset - nvs_part->size, in_ptr + 8, chunk_length);
+                we = esp_partition_write(zb_part, offset - nvs_part->size, in_ptr + 8, chunk_length);
+            }
+            if (we != ESP_OK) {
+                // M1: bail on a failed flash write instead of marching to the
+                // completion reboot with a corrupt image.
+                ESP_LOGE(TAG, "RESTORE_NETWORK: write failed at offset %lu: %s",
+                         (unsigned long)offset, esp_err_to_name(we));
+                s_restore_session.active = false;
+                return reply(outdata, GENERIC_OPERATION_FAILED);
             }
         }
 
@@ -2104,6 +2189,19 @@ struct zb_ncp::cmd_handle<GET_STRUCTURED_BACKUP> : immediate_cmd_process<GET_STR
         esp_zb_get_long_address(ieee);
         emit(backup_structured::TAG_COORD_IEEE, ieee, 8);
 
+        // BACKUP-5 (by design, decided 2026-05-30): the plaintext network key is
+        // exported over the unauthenticated USB link. This is intentional parity
+        // with mainline Z2M, whose coordinator_backup.json (Universal NWK Backup
+        // format) already stores networkKey in cleartext on the host filesystem —
+        // so this exposes nothing the host doesn't already persist. A host-set
+        // "lock" gate was considered and rejected: the shipped Z2M fork calls
+        // backup() automatically (controller start/stop + daily) and sends no
+        // unlock, so a default-locked gate would silently write keyless,
+        // unrestorable backups. The only threat a lock would add cover for is a
+        // passive USB-link sniffer that cannot read the host's data/ dir — too
+        // narrow to justify the regression. Leave exported; revisit only on
+        // concrete demand (then a default-UNLOCKED opt-in lock + a matching
+        // patch_zboss.js change that sends the unlock before backup()).
         uint8_t nwk_key[16];
         if (esp_zb_secur_primary_network_key_get(nwk_key) == ESP_OK) {
             emit(backup_structured::TAG_NWK_KEY, nwk_key, 16);
@@ -2213,7 +2311,15 @@ struct zb_ncp::cmd_handle<RESTORE_STRUCTURED_BACKUP> : immediate_cmd_process<RES
         // settings before the stack persists them via its normal save path.
         const auto zb_part = backup_zb_partition();
         if (zb_part) {
-            esp_partition_erase_range(zb_part, 0, zb_part->size);
+            esp_err_t ze = esp_partition_erase_range(zb_part, 0, zb_part->size);
+            if (ze != ESP_OK) {
+                // M1: don't reboot into apply_pending_restore() on a failed wipe
+                // — the stack would re-persist over a stale zb_storage. Report
+                // failure; the host can retry the whole RESTORE_STRUCTURED.
+                ESP_LOGE(TAG, "RESTORE_STRUCTURED_BACKUP: zb erase failed: %s",
+                         esp_err_to_name(ze));
+                return reply(outdata, GENERIC_OPERATION_FAILED);
+            }
         } else {
             ESP_LOGW(TAG, "RESTORE_STRUCTURED_BACKUP: zb_storage partition missing");
         }

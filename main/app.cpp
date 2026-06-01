@@ -35,6 +35,12 @@ esp_err_t app::send_event_int(const ctx_t& ctx) {
 }
 
 esp_err_t app::process_event(const ctx_t& ctx) {
+	// H1: m_buffer carries BOTH directions (EVENT_INPUT = NCP->host frame,
+	// EVENT_OUTPUT = host->NCP chunk). It must hold the largest protocol frame
+	// or such frames get rejected below *after* transport already queued them
+	// into m_input_buf -> the bytes strand and the link desyncs.
+	static_assert(BUFFER_SIZE >= protocol::MAX_FRAME_SIZE,
+	              "app::BUFFER_SIZE must cover protocol::MAX_FRAME_SIZE (H1)");
 	size_t recv_size = 0;
     esp_err_t ret = ESP_OK;
 
@@ -171,6 +177,15 @@ esp_err_t app::start_int() {
 esp_err_t app::init() {
 	ESP_LOGI(TAG,"init");
 	auto res = nvs_flash_init();
+	if (res == ESP_ERR_NVS_NO_FREE_PAGES || res == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		// M2: a host RESTORE_NETWORK can leave nvs in a layout this IDF build
+		// can't mount. Erase + re-init instead of returning the error up into
+		// ESP_ERROR_CHECK(app::init()) in main.cpp, which would abort and boot-
+		// loop the device with the host's serial port never answering again.
+		ESP_LOGW(TAG, "nvs_flash_init: %s -- erasing and retrying", esp_err_to_name(res));
+		nvs_flash_erase();
+		res = nvs_flash_init();
+	}
 	if (res != ESP_OK)
 		return res;
 	res = zb_ncp::init();

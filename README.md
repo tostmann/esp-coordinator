@@ -34,6 +34,17 @@ The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Te
 
 This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. As of 2026-05, the active upstream lives in this fork; the original `andryblack/esp-coordinator` repository is **archived and read-only** and its README points here. If you arrived via a search hit on one of the archived `andryblack` issues, see [`LEGACY_ANDRYBLACK_ISSUES.md`](LEGACY_ANDRYBLACK_ISSUES.md) for the current status of each report.
 
+### v1.2.33 — Code-Review Hardening
+
+A full whole-codebase review fixed two memory-safety criticals and a batch of robustness/correctness issues. Every change was adversarially re-verified, and the build was validated end-to-end on hardware (network formation → device interview → backup) against the Zigbee2MQTT `adapter:zboss` host.
+
+* **Memory-safety (critical):** fixed an out-of-bounds stack write + info-leak in the `APSDE_DATA_REQ` confirm serializer (fired on *every* APS confirm), and a `packet_len < 7` length underflow in the frame parser where a single crafted frame could trigger a multi-GB out-of-bounds read and a remote crash/restart-loop. A new length guard in `on_rx_data` closes six downstream over-read paths at one point. The host-side JS parser (`html/zboss_backup.js`) carries the matching min-length guard.
+* **Cross-task data races:** the request-resolver slot table and the `single_cmd_delayed` slot (`NWK_FORMATION` / `NWK_START_WITHOUT_FORMATION`) are now mutex-guarded with atomic take-and-clear, removing torn-read races between the app task and the ZBOSS task.
+* **Defined-behaviour access:** all unaligned 16/32-bit reads/writes in the ZDO/APSDE response serializers converted to `memcpy`.
+* **Robustness:** RESTORE paths now check every `esp_partition` result and abort cleanly instead of half-wiping NVS then rebooting; `nvs_flash_init` does erase-and-retry instead of boot-looping on a host-restored bad layout; the transport TX capacity check moved inside the mutex (no two-writer frame corruption); app/protocol buffer-size drift closed.
+* **`SET_EXTENDED_PAN_ID` byte order** now mirrors `GET_EXTENDED_PAN_ID`'s 8-byte reversal so the pair round-trips — verified on hardware against a non-palindrome ext PAN ID.
+* **Hygiene:** atomic version-file writes, validated `version.txt`, host-side ACK + CRC validation in the web flasher, and the never-implemented UART transport option removed (USB-Serial/JTAG only).
+
 ### v1.2.x — Structured Backup + Hybrid Restore
 
 * **Structured backup** (NCP commands `0x009B GET_STRUCTURED_BACKUP` / `0x009C RESTORE_STRUCTURED_BACKUP`): the coordinator now exports its identity (`panID`, `extendedPanID`, `channel`, `nwkUpdateId`, coordinator IEEE, NWK key, live NWK outgoing frame counter, neighbor table) as a small TLV image (~80 B + 16 B/device). Magic `'ZBSB'`, format version 1.
@@ -91,7 +102,7 @@ compat gaps against current zigpy / serialx, and extends ZHA's
 `RadioType` enum so **ZBOSS** appears as a selectable radio type in the
 add-integration flow.
 
-**Status as of v1.1.23**: setup gets through firmware probe / radio-type
+**Status as of v1.2.33**: setup gets through firmware probe / radio-type
 pick / network formation cleanly. The full end-to-end add-integration flow
 beyond that still hits additional `zigpy-zboss` bit-rot against zigpy 1.4
 that is outside this firmware's scope to fix — those gaps are tracked in

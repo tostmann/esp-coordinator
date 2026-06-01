@@ -9,6 +9,15 @@ CONFIG_NCP_BUS_MODE_USB=y
 CONFIG_ZB_ENABLED=y
 CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=10
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# BUILD-2 — console routing (intentional self-override; do NOT "simplify").
+# These four lines disable every console; the block further down then re-enables
+# UART0 as the primary console (CONFIG_ESP_CONSOLE_UART_DEFAULT). defconfig is
+# "last value wins", so the effective config is: primary console = UART0,
+# secondary console = NONE. The load-bearing line here is
+# CONFIG_ESP_CONSOLE_SECONDARY_NONE=y — it keeps the USB-Serial/JTAG OFF the
+# console so it stays exclusively the NCP transport; never drop it. Output is
+# silent anyway because CONFIG_LOG_DEFAULT_LEVEL_NONE is set above, so logs can
+# never corrupt the frame stream even on UART0.
 CONFIG_ESP_CONSOLE_NONE=y
 CONFIG_ESP_CONSOLE_UART_NONE=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

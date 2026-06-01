@@ -19,6 +19,12 @@ public:
 	} __attribute__((packed));
 	static constexpr size_t MAX_PARALLEL_REQUESTS = 16;
 	static constexpr size_t ZB_TASK_STACK_SIZE = 1024 * 8;
+	// Overall network size the coordinator is configured for; the address /
+	// child tables are sized to this in init_int() (zb_config_overall_network_size
+	// + zb_set_max_children). GETSET-2: SET_MAX_CHILDREN rejects host values
+	// above it — they can't be honored and oversizing children feeds the
+	// zb_address.c:395 table-exhaustion assertion family.
+	static constexpr uint16_t OVERALL_NETWORK_SIZE = 200;
 private:
 	template <command_id_t Cmd>
 	struct cmd_handle;

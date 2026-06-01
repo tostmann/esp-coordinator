@@ -22,10 +22,6 @@ private:
 
 	uint8_t m_temp_buf[BUF_SIZE];
 
-#ifdef CONFIG_NCP_BUS_MODE_UART
-	QueueHandle_t m_uart_queue;
-#endif
-
 	esp_err_t write_int(const void* data,size_t size);
 	void task_int();
 

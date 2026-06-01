@@ -19,16 +19,24 @@ protocol& protocol::instance() {
 	return s_protocol;
 }
 
+// Return the first plausible signature start: a 0xDE that is either followed by
+// 0xAD (a real DE AD) or sits at the very end of the buffer (a partial signature
+// to keep while waiting for more bytes). PROTO-2: the previous version returned
+// nullptr on a 0xDE followed by a non-0xAD byte, so the caller broke and never
+// advanced past that false 0xDE — the buffer kept the stale prefix and resync
+// stalled until overflow. Now a false 0xDE is skipped and the scan continues, so
+// e.g. `DE FF DE AD …` still locks onto the real signature at index 2.
 static uint8_t* find_signature(uint8_t* s,const uint8_t* end) {
-	while (true) {
-		if (s == end) return nullptr;
-		if (*s++ == 0xde)
-			break;
+	while (s != end) {
+		if (*s == 0xde) {
+			if (s + 1 == end)   // 0xDE at buffer end: keep it, wait for more data
+				return s;
+			if (s[1] == 0xad)   // full DE AD signature
+				return s;
+			// false 0xDE (next byte != 0xAD): fall through to skip it
+		}
+		++s;
 	}
-	if (s == end)
-		return nullptr;
-	if (*s == 0xad)
-		return s-1;
 	return nullptr;
 }
 
@@ -108,7 +116,10 @@ esp_err_t protocol::send_data_int(const void* data,size_t size) {
 	hdr->last_fragment = 1;
 	hdr->header_crc = utils::crc8(&hdr->packet_len,4);
 	m_tx_seq = next_seq(m_tx_seq);
-	*reinterpret_cast<uint16_t*>(hdr+1) = utils::crc16(data,size);
+	// PROTO-3: hdr+1 sits at offset sizeof(ncp_header_t)==7 (odd) — an unaligned
+	// uint16_t store is UB. memcpy the CRC16 instead (compiles to the same on C6).
+	uint16_t data_crc = utils::crc16(data,size);
+	memcpy(reinterpret_cast<uint8_t*>(hdr+1),&data_crc,sizeof(data_crc));
 	memcpy(reinterpret_cast<uint8_t*>(hdr+1)+2,data,size);
 	auto data_size = sizeof(ncp_header_t) + 2 + size;
 	return transport::send(m_tx_buffer,data_size);
@@ -181,9 +192,23 @@ esp_err_t protocol::on_rx_int(const void* data,size_t size) {
 				on_rx_packet(*hdr,nullptr,0);
 				
 			} else {
+				if (hdr->packet_len < 7) {
+					// packet_len in {0,1,2,3,4,6}: too short to carry the 2-byte
+					// data CRC + >=1 payload byte (5 was the empty-packet case
+					// above). Without this guard `packet_len - 5 - 2` underflows
+					// to ~4 GB and crc16() walks off m_rx_buffer -> LoadProhibited
+					// reboot from one crafted frame. Skip the DE AD and resync,
+					// exactly like the header-CRC-mismatch path above (C2).
+					rx_data += 2;
+					rx_data_size -= 2;
+					continue;
+				}
 				size_t data_len = hdr->packet_len - 5 - 2;
 				packet_len = sizeof(ncp_header_t) + 2 + data_len;
-				auto data_crc_expected = *reinterpret_cast<const uint16_t*>(hdr+1);
+				// PROTO-3: unaligned read at offset 7 — memcpy instead of an
+				// unaligned uint16_t load (UB; works on C6 SRAM).
+				uint16_t data_crc_expected;
+				memcpy(&data_crc_expected, reinterpret_cast<const uint8_t*>(hdr+1), sizeof(data_crc_expected));
 				auto data = reinterpret_cast<const uint8_t*>(hdr+1) + 2;
 				
 				auto data_crc = utils::crc16(data,data_len);

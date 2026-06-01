@@ -207,9 +207,9 @@ static const zb_af_simple_desc_7_20_t ep1 = {
 extern "C" void zb_config_overall_network_size(uint16_t size);
 
 esp_err_t zb_ncp::init_int() {
-	zb_config_overall_network_size(200); // Set network size first to scale up tables
+	zb_config_overall_network_size(OVERALL_NETWORK_SIZE); // Set network size first to scale up tables
 	ZB_INIT();
-	zb_set_max_children(200);
+	zb_set_max_children(OVERALL_NETWORK_SIZE);
     zb_set_nvram_erase_at_start(0);
     zb_set_installcode_policy(0);
     zb_tc_set_use_installcode(0);
@@ -261,6 +261,16 @@ bool zb_ncp::start_zigbee_stack() {
 }
 
 void zb_ncp::on_rx_data(const void* data,size_t size) {
+	// Guard BEFORE dereferencing cmd: a data packet with packet_len 7..11 hands
+	// us data_len 0..4 (< sizeof(cmd_t)). Reading cmd.type/command_id from such
+	// a sub-header frame OOB-reads the RX-buffer tail, and `size - sizeof(cmd_t)`
+	// wraps to ~SIZE_MAX, defeating every helper's `inlen < sizeof(Arg)` check
+	// (worst case SET_NWK_KEY pulling 16 key bytes from an uninit buffer).
+	// One guard closes DISP-1/HELP-1/SEC-2/GETSET-1/ZDO-2/BACKUP-4.
+	if (size < sizeof(cmd_t)) {
+		ESP_LOGE(TAG,"cmd frame too short: %u",unsigned(size));
+		return;
+	}
 	const cmd_t& cmd = *static_cast<const cmd_t*>(data);
 	if (cmd.type != REQUEST && cmd.type != RESPONSE) {
 		ESP_LOGE(TAG,"Indication received from host");
@@ -314,7 +324,10 @@ void zb_ncp::indication(command_id_t cmd,const void* data,size_t size) {
 	}
 	buffer[0] = 0;
 	buffer[1] = INDICATION;
-	*reinterpret_cast<uint16_t*>(&buffer[2]) = cmd;
+	// PROTO-3: buffer+2 is an unaligned offset; an unaligned uint16_t store is
+	// UB (works on C6 SRAM, but keep it clean). memcpy the 16-bit command_id.
+	uint16_t cmd16 = static_cast<uint16_t>(cmd);
+	memcpy(&buffer[2], &cmd16, sizeof(cmd16));
 	memcpy(&buffer[4],data,size);
 	auto res = protocol::send_data( buffer, size+4 ); 
 	if (res != ESP_OK) {
@@ -362,7 +375,9 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
 
       uint8_t* out = outdata;
       auto write_u16 = [&out](uint16_t val) {
-        *reinterpret_cast<uint16_t*>(out) = val;
+        // PROTO-3: `out` advances by mixed u8/u16 steps so it is frequently
+        // unaligned — memcpy avoids the UB of an unaligned uint16_t store.
+        memcpy(out, &val, 2);
         out += 2;
       };
       auto write_u8 = [&out](uint8_t val) {
@@ -668,8 +683,14 @@ bool zb_ncp::try_intercept_simple_desc_rsp(const uint8_t* p, uint16_t len) {
     const uint8_t  declared_sd = p[4];
 
     using Resolver = request_cmd_resolver<ZDO_SIMPLE_DESC_REQ, zb_zdo_simple_desc_req_t>;
-    auto req = Resolver::resolve(tsn);
-    if (!req) {
+    // DISP-2: claim+free the slot atomically up front. We then build and send the
+    // synthesised response (a blocking send_cmd_data) on the local copy, so the
+    // app task can't re-pick this slot mid-send. resolve_take already does what
+    // the old trailing `req->state = S_NONE` did — free the slot so the late
+    // ZBOSS TIMEOUT callback (~20 s out, after APS retries exhaust) finds no
+    // match and is silently dropped (req_cb's "not found" path).
+    Resolver::request_t req;
+    if (!Resolver::resolve_take(tsn, req)) {
         // No pending request matches this tsn — either already handled by
         // somebody else, or stale. Let the stack continue (caller will return
         // false to ZBOSS) so its normal error path runs.
@@ -693,7 +714,7 @@ bool zb_ncp::try_intercept_simple_desc_rsp(const uint8_t* p, uint16_t len) {
     // plus 2 status header + 2 nwk + cmd_t = 80 bytes. Reserve 128 for slack.
     uint8_t outdata[128];
     auto out_cmd = reinterpret_cast<cmd_t*>(outdata);
-    *out_cmd       = req->cmd;
+    *out_cmd       = req.cmd;
     out_cmd->type  = RESPONSE;
 
     uint8_t* out = reinterpret_cast<uint8_t*>(out_cmd + 1);
@@ -766,11 +787,6 @@ bool zb_ncp::try_intercept_simple_desc_rsp(const uint8_t* p, uint16_t len) {
 
     zb_ncp::send_cmd_data(outdata, out - outdata);
 
-    // Free the slot so the late ZBOSS TIMEOUT callback (which will arrive
-    // ~20 s from now after the stack's APS retries exhaust) finds no match
-    // and is silently dropped — see req_cb's "not found request for response"
-    // path in commands_helpers.h.
-    req->state = Resolver::request_t::S_NONE;
-
+    // Slot was already freed atomically by resolve_take above (DISP-2).
     return true;
 }

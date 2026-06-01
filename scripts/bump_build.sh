@@ -23,9 +23,21 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$DIR/version.txt"
 BUILD_NUM_FILE="$DIR/build_number.txt"
 
-# --- MAJOR / MINOR aus version.txt parsen (fallback 1.1) -------------------
+# --- MAJOR / MINOR aus version.txt parsen ----------------------------------
+# BUILD-3: validieren BEVOR geparst wird. version.txt liegt auf NFS; ein
+# transienter Read kann eine leere / NUL- / abgeschnittene Datei liefern. Die
+# alte Logik fiel dann still auf 1.1 zurück und überschrieb version.txt mit
+# "1.1.<n>" — die echte MAJOR.MINOR-Phase (z.B. 1.2) ging verloren, der Counter
+# lief mit falscher Version weiter. Stattdessen laut abbrechen, statt eine
+# degradierte Version festzuschreiben. Akzeptiert MAJOR.MINOR oder
+# MAJOR.MINOR.BUILD (Hand-Edit bei Phasenwechsel), lehnt alles andere ab.
 if [ -f "$VERSION_FILE" ]; then
     cur="$(tr -d '[:space:]' < "$VERSION_FILE")"
+    if ! printf '%s' "$cur" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+        echo "[bump] ERROR: version.txt unlesbar/korrupt: '$cur'" >&2
+        echo "[bump] verweigere Überschreiben mit degradierter Version. version.txt reparieren und erneut bauen." >&2
+        exit 1
+    fi
     MAJOR="${cur%%.*}"
     rest="${cur#*.}"
     MINOR="${rest%%.*}"
@@ -53,8 +65,32 @@ if git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 # --- Schritt 2 + 3: Counter und version.txt schreiben ----------------------
+# BUILD-1: die Version-Files liegen auf einem NFS-Mount; ein blankes `echo >`
+# flusht nur in den Client-Cache, sodass ein Leser (CMake configure_file, ein
+# zweiter Build-Step) die Datei NUL-präfixiert / halb geschrieben sieht ->
+# Versions-Counter Schrott. Atomar schreiben mit fsync + atomarem Rename
+# (_atomic_write_bytes-Pattern aus der globalen Regel). python3 ist im
+# gesourcten ESP-IDF-Env auf PATH; bei Fehlen bricht der Hook laut ab (set -e),
+# statt eine kaputte Datei zu hinterlassen.
+_atomic_write() {
+    python3 - "$1" "$2" <<'PY'
+import os, sys
+path, content = sys.argv[1], sys.argv[2]
+data = (content + "\n").encode()
+tmp = path + ".tmp"
+with open(tmp, "wb") as f:
+    f.write(data); f.flush(); os.fsync(f.fileno())
+os.replace(tmp, path)                       # atomar; frische Inode umgeht stale page-cache
+dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+try:
+    os.fsync(dfd)                           # committet den Rename
+finally:
+    os.close(dfd)
+PY
+}
+
 n=$((prev_n + 1))
-echo "$n" > "$BUILD_NUM_FILE"
-echo "${MAJOR}.${MINOR}.${n}" > "$VERSION_FILE"
+_atomic_write "$BUILD_NUM_FILE" "$n"
+_atomic_write "$VERSION_FILE" "${MAJOR}.${MINOR}.${n}"
 
 echo "[bump] esp-coordinator v${MAJOR}.${MINOR}.${n}  ($(date -Iseconds))"

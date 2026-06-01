@@ -26,9 +26,16 @@ private:
 	static constexpr size_t EVENT_QUEUE_LEN = 60;
 	static constexpr size_t TIMEOUT_MS  = 10;
 
-	// Must be >= transport::BUF_SIZE (currently 1024) — undersizing causes silent
-	// drops of bursts >BUFFER_SIZE in process_event (ESP_ERR_NO_MEM path).
-	static constexpr size_t BUFFER_SIZE = 1024;
+	// Sized to the LARGER of the two directions multiplexed through m_buffer in
+	// process_event:
+	//   - host->NCP read chunk = transport::BUF_SIZE       (1024)
+	//   - NCP->host frame       = protocol::MAX_FRAME_SIZE  (2048; full 64-entry
+	//                             Mgmt_Lqi / Mgmt_Bind responses)
+	// Undersizing strands oversize NCP->host frames: transport commits them to
+	// m_input_buf, then process_event rejects ctx.size>BUFFER_SIZE and the bytes
+	// rot in the FIFO -> permanent link desync (H1). The static_assert in
+	// app.cpp ties this to protocol's value so the two layers can't drift.
+	static constexpr size_t BUFFER_SIZE = 2048;
 
 	QueueHandle_t m_queue; 
 	uint8_t m_buffer[BUFFER_SIZE];

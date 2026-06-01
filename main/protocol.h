@@ -50,6 +50,13 @@ private:
 	esp_err_t send_data_int(const void* data,size_t size);
 	
 public:
+	// Largest single frame the protocol layer ever hands to transport::send
+	// (NCP->host direction = m_tx_buffer). app::m_buffer must be >= this or an
+	// oversize frame (e.g. a full 64-entry Mgmt_Lqi/Mgmt_Bind table) strands in
+	// transport's m_input_buf and permanently desyncs the link — see the
+	// static_assert in app::process_event (H1).
+	static constexpr size_t MAX_FRAME_SIZE = TX_BUFFER_SIZE;
+
 	static esp_err_t init() { return instance().init_int(); }
 	static esp_err_t start() { return instance().start_int(); }
 

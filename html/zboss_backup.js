@@ -47,7 +47,7 @@ class ZbossSerial {
         this.reader = null;
         this.writer = null;
         this.buffer = new Uint8Array(0);
-        // pendingRequests[tsn] = { cmdId, resolve, timer }. Storing cmdId
+        // pendingRequests[tsn] = { cmdId, resolve, reject, timer }. Storing cmdId
         // lets processBuffer reject unsolicited INDICATION frames that
         // happen to land on the same tsn but carry a different cmdId.
         this.pendingRequests = {};
@@ -86,6 +86,11 @@ class ZbossSerial {
         for (const tsn in this.pendingRequests) {
             const slot = this.pendingRequests[tsn];
             try { clearTimeout(slot.timer); } catch (e) {}
+            // H3: actually reject the pending promise. Without this, an
+            // `await sendCommand(...)` in flight when the link drops (e.g. a
+            // transient Break on C6 first-open-after-reenum) never settles and
+            // freezes the UI (worst case: mid-restore, after the erase).
+            try { if (slot.reject) slot.reject(new Error("link closed")); } catch (e) {}
         }
         this.pendingRequests = {};
         try { if (this.reader) await this.reader.cancel(); } catch (e) {}
@@ -124,20 +129,61 @@ class ZbossSerial {
             for (let i = 0; i < this.buffer.length - 1; i++) {
                 if (this.buffer[i] === 0xDE && this.buffer[i+1] === 0xAD) { start = i; break; }
             }
-            if (start === -1) { this.buffer = new Uint8Array(0); return; }
+            if (start === -1) {
+                // JSHOST-4: no DE AD pair found. A 0xDE in the LAST position may
+                // be the first byte of a signature whose 0xAD arrives in the next
+                // read (frame split across reads) — keep it, drop everything
+                // else. The old code discarded the whole buffer including that
+                // 0xDE, desyncing on a read boundary that split the signature.
+                // Mirrors the firmware find_signature() trailing-0xDE behavior.
+                const last = this.buffer.length - 1;
+                this.buffer = (last >= 0 && this.buffer[last] === 0xDE)
+                    ? this.buffer.slice(last)
+                    : new Uint8Array(0);
+                return;
+            }
             if (start > 0) this.buffer = this.buffer.slice(start);
             if (this.buffer.length < 7) return;
 
             const packet_len = this.buffer[2] | (this.buffer[3] << 8);
+            // Mirror firmware protocol.cpp (C2b): a valid frame is packet_len
+            // === 5 (empty / ACK) or >= 7 (header + 2-byte data CRC + >=1
+            // payload byte). Values in {0,1,2,3,4,6} are malformed; skip the
+            // DE AD and resync instead of consuming a bogus length. Keeps the
+            // two parsers byte-compatible.
+            if (packet_len !== 5 && packet_len < 7) {
+                this.buffer = this.buffer.slice(2);
+                continue;
+            }
+            // JSHOST-6: validate the 1-byte header CRC8 (over bytes 2..5) BEFORE
+            // trusting packet_len to frame the rest. On mismatch skip the DE AD
+            // and resync, exactly like the firmware (protocol.cpp header-CRC path).
+            if (crc8(this.buffer.slice(2, 6)) !== this.buffer[6]) {
+                this.buffer = this.buffer.slice(2);
+                continue;
+            }
             if (this.buffer.length < packet_len + 2) return; // Wait for full frame
 
             const frame = this.buffer.slice(0, packet_len + 2);
             this.buffer = this.buffer.slice(packet_len + 2);
 
             const isACK = (frame[5] & 0x01) === 1;
+            const isNACK = (frame[5] & 0x02) === 0x02;
             const sequence = (frame[5] >> 2) & 0x03;
             const ackSeq = (frame[5] >> 4) & 0x03;
             this.recvSeq = sequence;
+
+            // JSHOST-7: a device NACK (our host→device frame failed its CRC on
+            // the chip) was silently ignored, so a pending request only failed
+            // via the 5 s timeout. Surface it. The NACK carries ackSeq (the
+            // packet_seq it rejects), not a tsn, so we can't map it to a specific
+            // request — log it and let the per-request timeout fire. Don't ACK a
+            // NACK (it sets both is_ack and is_nack); retransmit is unsupported
+            // on the device side anyway (protocol.cpp on_rx_packet).
+            if (isNACK) {
+                this.log("Device NACK received (ackSeq=" + ackSeq + "); a request frame was rejected, will time out.");
+                continue;
+            }
 
             if (isACK && packet_len === 5) {
                 // Ignore empty ACKs
@@ -145,10 +191,22 @@ class ZbossSerial {
             }
 
             if (packet_len > 5) {
-                const payload = frame.slice(9); // Skip header and crc16
+                const payload = frame.slice(9); // Skip header (7) and crc16 (2)
                 // ACK every received frame regardless of whether we route it
                 // — the chip's flow control depends on us acknowledging.
                 this.sendAck(this.recvSeq);
+
+                // JSHOST-6: validate the payload CRC16 (frame[7..8], LE) before
+                // delivering. A corrupted payload must not resolve a pending
+                // request with garbage; ACK first (flow control), then drop on
+                // mismatch so the request times out and the caller can retry.
+                const expectedCrc = frame[7] | (frame[8] << 8);
+                const actualCrc = crc16(payload);
+                if (actualCrc !== expectedCrc) {
+                    this.log("RX payload CRC16 mismatch (got 0x" + actualCrc.toString(16) +
+                             " want 0x" + expectedCrc.toString(16) + "), dropping frame.");
+                    continue;
+                }
 
                 const cmdId = payload[2] | (payload[3] << 8);
                 const tsn = payload[4];
@@ -208,7 +266,7 @@ class ZbossSerial {
 
         return new Promise(async (resolve, reject) => {
             const timer = setTimeout(() => { delete this.pendingRequests[tsn]; reject("Timeout (cmd=0x" + cmdId.toString(16) + " tsn=" + tsn + ")"); }, 5000);
-            this.pendingRequests[tsn] = { cmdId, resolve, timer };
+            this.pendingRequests[tsn] = { cmdId, resolve, reject, timer };
             this.writeLock = this.writeLock.then(() => this.writer.write(out)).catch(e => this.log(e));
             await this.writeLock;
         });
@@ -622,9 +680,10 @@ async function identifyCoordinator() {
 async function doBackup() {
     const logger = (msg) => document.getElementById('log').innerText += msg + '\n';
     const progress = document.getElementById('progress');
+    let zboss = null;
     try {
         const port = await navigator.serial.requestPort();
-        const zboss = new ZbossSerial(port, logger);
+        zboss = new ZbossSerial(port, logger);
         await zboss.connect();
 
         progress.style.display = 'block';
@@ -714,6 +773,12 @@ async function doBackup() {
         progress.innerText = `Saved: ${link.download}`;
     } catch (e) {
         logger("Error: " + e);
+    } finally {
+        // JSHOST-3: always release the port. disconnect() is idempotent, so this
+        // is a no-op after the success-path disconnect above, but it closes the
+        // port if connect()/a command threw mid-backup — otherwise the handle
+        // leaks and the next port.open() rejects with InvalidStateError.
+        if (zboss) { try { await zboss.disconnect(); } catch (e) {} }
     }
 }
 
@@ -758,8 +823,19 @@ async function doRestore() {
     }
 
     const totalSize = raw.length;
+    // JSHOST-5: RESTORE_NETWORK erases nvs+zb_storage on the offset-0 chunk.
+    // Reject a wrong-sized image up front (the firmware also rejects
+    // total_size != capacity before erasing, but failing here is clearer and
+    // never opens a session). 0xA000 = nvs(24K) + zb_storage(16K).
+    const EXPECTED_RAW_SIZE = 0x6000 + 0x4000;
+    if (totalSize !== EXPECTED_RAW_SIZE) {
+        logger(`Refusing restore: raw NVRAM is ${totalSize} bytes, expected ${EXPECTED_RAW_SIZE} (0x${EXPECTED_RAW_SIZE.toString(16)}). File is truncated or not an esp-coordinator backup.`);
+        return;
+    }
+
+    let zboss = null;
     try {
-        const zboss = new ZbossSerial(port, logger);
+        zboss = new ZbossSerial(port, logger);
         await zboss.connect();
 
         logger("Starting restore…");
@@ -805,6 +881,11 @@ async function doRestore() {
     } catch (e) {
         logger("Error: " + e);
         hideRebootModal();
+    } finally {
+        // JSHOST-3: idempotent — releases the port if the restore loop threw
+        // (e.g. a chunk NACK) so the handle doesn't leak past a failed restore
+        // and block the next port.open().
+        if (zboss) { try { await zboss.disconnect(); } catch (e) {} }
     }
 }
 
