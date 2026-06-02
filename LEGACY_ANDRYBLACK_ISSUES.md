@@ -116,6 +116,39 @@ the Tuya intercept, APSDE indication buffer raised to 512 bytes for OTA /
 multi-attribute reads, ZDO request-slot lifecycle hardening, 200-node
 `max_children` — see `git log` between `e77c32f..e4263ec`.
 
+### [andryblack#2](https://github.com/andryblack/esp-coordinator/issues/2) — Home Assistant ZHA / zigpy-zboss compatibility
+
+This asked whether the firmware can be driven from Home Assistant's **ZHA**
+integration (through the `zigpy-zboss` radio library) instead of only
+Zigbee2MQTT. As of mid-2026 there is a working path, though it is younger and
+less mature than the Z2M one.
+
+- **Wire- and lifecycle-level compatibility is verified.** `zigpy-zboss`
+  drives this firmware over USB-Serial/JTAG: `connect`, version, role /
+  join-status getters, network formation, and persistence across a hardware
+  reset all round-trip correctly against the ZBOSS NCP protocol the firmware
+  exposes.
+- **A companion HACS component wires it into ZHA:**
+  [`tostmann/zha-zboss-esp`](https://github.com/tostmann/zha-zboss-esp) bundles
+  `zigpy-zboss`, applies the runtime shims it currently needs against modern
+  zigpy, and registers **ZBOSS** as a selectable radio type in ZHA's
+  add-integration flow.
+- **[v0.2.0](https://github.com/tostmann/zha-zboss-esp/releases/tag/v0.2.0)
+  fixes a loading bug** ([`zha-zboss-esp#1`](https://github.com/tostmann/zha-zboss-esp/issues/1)):
+  the 0.1.x component declared no config flow and had no other load trigger, so
+  a plain HACS install only downloaded the files and never actually *ran* the
+  component — the radio type was never registered and ZBOSS never appeared.
+  v0.2.0 loads via a config entry, so the patch runs on every start and ZBOSS
+  is offered in the radio picker.
+
+**Still gated upstream:** full *device pairing* through ZHA depends on
+`zigpy-zboss` fixes that are not all released yet
+([kardia-as/zigpy-zboss#19](https://github.com/kardia-as/zigpy-zboss/issues/19),
+PR #74). Until those land, **Zigbee2MQTT via
+`ghcr.io/tostmann/zigbee2mqtt-esp32` remains the recommended, mature host
+path** for this hardware. The ZHA route is usable for getting the coordinator
+recognised and a network formed, but is still labelled early.
+
 ## Still open in our working backlog
 
 ### [andryblack#17](https://github.com/andryblack/esp-coordinator/issues/17) — Sensors don't auto-report (manual poll works)
@@ -129,13 +162,11 @@ with the device model + `_TZxxxx_…` or vendor manuf-code so we can categorise.
 
 ## Not actionable / stale
 
-The following reports are either build / general help questions from 2024–
-early-2025 that the original author or community members answered in-thread,
-or out-of-scope topics (HA ZHA via zigpy-zboss rather than Z2M via
-zigbee-herdsman). They do not represent open work for us:
+The following reports are build / general help questions from 2024–
+early-2025 that the original author or community members answered in-thread.
+They do not represent open work for us:
 
 - [andryblack#10](https://github.com/andryblack/esp-coordinator/issues/10) — compile question, 04/2025
 - [andryblack#9](https://github.com/andryblack/esp-coordinator/issues/9) — generic "Help" question, 03/2025
 - [andryblack#3](https://github.com/andryblack/esp-coordinator/issues/3) — documentation-tip from @Hedda
-- [andryblack#2](https://github.com/andryblack/esp-coordinator/issues/2) — Home Assistant ZHA / zigpy-zboss compatibility (different host-side stack — not in our scope)
 - [andryblack#1](https://github.com/andryblack/esp-coordinator/issues/1) — community offer to help with ZBOSS, 10/2024
