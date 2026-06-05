@@ -5,7 +5,9 @@
 
 #include "commands_helpers.h"
 #include <esp_mac.h>
-#include "soc/usb_serial_jtag_reg.h"
+// (soc/usb_serial_jtag_reg.h include dropped 2026-06-05 — it only served the
+// removed USB phy-detach register writes, see the comment in
+// ncp_reset_deferred_task.)
 
 
 // default implementation
@@ -77,13 +79,23 @@ static void ncp_reset_deferred_task(void* arg) {
     // and out the USB-Serial/JTAG ring. 300 ms is generous — actual TX of
     // the ~18-byte response is sub-millisecond — but cheap insurance.
     vTaskDelay(pdMS_TO_TICKS(300));
+    // NO flash access here — neither ZBOSS APIs nor raw esp_partition.
+    // Both variants were observed to freeze the chip when invoked from
+    // this task while the 802.15.4 radio is active (2026-06-05, zigpy-zboss
+    // validation: zb_nvram_erase() AND a raw esp_partition_erase_range
+    // each stalled with caches disabled — total silence incl. LL-ACKs,
+    // only a power-cycle/USB-reset recovers; USB stays enumerated because
+    // USB-Serial-JTAG enumerates in hardware). zigpy's write_network_info()
+    // always begins with NCP_RESET(FactoryReset), so the entire ZHA
+    // auto_form path wedged here. herdsman never hit it because it resets
+    // with options=0. The erase request is parked in RTC-noinit RAM
+    // (survives esp_restart, zero flash ops pre-reset) and executed in
+    // app_main() on the next boot, before the stack/radio starts — see
+    // handle_pending_erase() in main.cpp.
     if (options == 1 || options == 2) {
-        ESP_LOGI(TAG,"erase nvram");
-        zb_nvram_erase();
-    }
-    if (options == 2) {
-        ESP_LOGI(TAG,"factory reset");
-        zb_bdb_reset_via_local_action(0);
+        ESP_LOGI(TAG,"park erase request for next boot (options=%d)", options);
+        extern uint32_t g_pending_ncp_erase;
+        g_pending_ncp_erase = 0xFAC70000u | options;
     }
     // Force a USB disconnect before esp_restart so the host's CDC layer
     // sees the device drop off the bus. ESP32-C6's USB-Serial-JTAG endpoint
@@ -110,28 +122,78 @@ static void ncp_reset_deferred_task(void* arg) {
     // the tostmann/zigbee2mqtt-esp32 herdsman fork to either accept tsn=0xFF
     // as a wildcard match for NCP_RESET or to resolve pending NCP_RESET
     // promises on inReset clear.  Filed as a separate open issue.
-    ESP_LOGI(TAG,"USB detach");
-    SET_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PAD_PULL_OVERRIDE);
-    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_DP_PULLUP);
-    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
-    vTaskDelay(pdMS_TO_TICKS(800));
+    // USB phy detach REMOVED (2026-06-05). The three USB_SERIAL_JTAG_CONF0
+    // register writes that used to live here (PAD_PULL_OVERRIDE set,
+    // DP_PULLUP + USB_PAD_ENABLE cleared) HARD-FREEZE the chip on current
+    // IDF 5.5.3 builds: the store never completes (bus stall), no panic, no
+    // INT-WDT, the JTAG DTM behind the USB bridge dies too ("Unsupported DTM
+    // version: -1" from OpenOCD), USB stays enumerated (pure hardware), and
+    // only an EN/power reset recovers. Isolated empirically: identical
+    // firmware with ONLY these three writes removed completes the whole
+    // reset path (SW_CPU reboot at +1.1 s, boot frames arrive on the open
+    // host fd). This also retro-explains the "10 s reset timeout" class on
+    // the herdsman USB factory-reset path — the device was bricked-until-
+    // replug, not slow.
+    //
+    // Consequence: across esp_restart() the USB-Serial-JTAG endpoint stays
+    // enumerated and the host sees no port-close. zigpy-zboss handles this
+    // fine (it probes the existing link after 5 s — verified live);
+    // zigbee-herdsman's inReset flag again never clears on the USB
+    // transport (uart.js:176), which is the pre-existing documented gap.
+    // A working detach needs a sanctioned IDF mechanism (usb phy/LL API or
+    // driver uninstall first) — tracked as an open follow-up.
+    // 150 ms: enough for the link-layer ACK to the NCP_RESET request (sent by
+    // protocol::on_rx_packet before this task was spawned) to drain out of
+    // the transport buffers on either interface. The former 800 ms grace for
+    // "response + host processing" is gone along with the pre-reboot
+    // response itself — see cmd_handle<NCP_RESET> below.
+    vTaskDelay(pdMS_TO_TICKS(150));
     ESP_LOGI(TAG,"restart");
     esp_restart();
 }
 
+// NCP_RESET deliberately sends NO pre-reboot response (changed 2026-06-05,
+// pre-release hardening). The previous design replied GENERIC_OK and then
+// rebooted 800 ms later — but hosts treat the NCP_RESET response as "reset
+// complete" and continue IMMEDIATELY: zigbee-herdsman's driver.startup()
+// does reset(FactoryReset) -> await response -> formNetwork(), and our z2m
+// fork's restore-resume does reset -> backup pull. Everything they sent in
+// the [response .. +800 ms] window was then killed mid-flight by our
+// esp_restart (reproduced deterministically on the UART rig: the post-
+// restore raw-backup pull ALWAYS died ~chunk 44, console trace
+// 2026-06-05). Protocol-correct semantics instead: the RESPONSE to
+// NCP_RESET is the boot-ready frame the firmware already emits after every
+// boot from continue_zboss (NCP_RESET frame, tsn=0xFF) — herdsman matches
+// NCP_RESET responses with a WILDCARD tsn (driver.js:235) and zigpy-zboss
+// probes the link after reset rather than requiring an immediate reply
+// (both verified live). So: park the erase request, reboot fast, let the
+// boot-ready frame complete the host's wait — the host can only ever talk
+// to a fully-rebooted, stable NCP.
 template <>
-struct zb_ncp::cmd_handle<NCP_RESET> : immediate_cmd_process<NCP_RESET>,
-		general_status_arg<NCP_RESET,uint8_t> {
-	static void process_status_arg(ncp_generic_status_t& status, uint8_t options) {
-        auto* args = new ncp_reset_args_t{options};
-        BaseType_t ok = xTaskCreate(ncp_reset_deferred_task,
-                                    "rst_dly", 4096, args, 5, NULL);
-        if (ok != pdTRUE) {
-            delete args;
-            status = GENERIC_NO_RESOURCES;
-            return;
-        }
-    }
+struct zb_ncp::cmd_handle<NCP_RESET> {
+	static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
+		uint8_t options = 0;
+		if (len >= 1) {
+			memcpy(&options, buffer, 1);
+		}
+		auto* args = new ncp_reset_args_t{options};
+		BaseType_t ok = xTaskCreate(ncp_reset_deferred_task,
+		                            "rst_dly", 4096, args, 5, NULL);
+		if (ok != pdTRUE) {
+			delete args;
+			// Resource failure: reply NO_RESOURCES so the host's wait fails
+			// fast instead of timing out — the device is NOT going to reboot.
+			uint8_t outdata[sizeof(zb_ncp::cmd_t) + sizeof(generic_response_t)];
+			auto out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
+			*out_cmd = cmd;
+			out_cmd->type = zb_ncp::RESPONSE;
+			auto resp = reinterpret_cast<generic_response_t*>(out_cmd + 1);
+			resp->category = STATUS_CATEGORY_GENERIC;
+			resp->status   = GENERIC_NO_RESOURCES;
+			zb_ncp::send_cmd_data(outdata, sizeof(outdata));
+		}
+		// Success path: no response on purpose (see block comment above).
+	}
 };
 
 // Requests current Zigbee role of the local device
@@ -667,7 +729,7 @@ struct zb_ncp::cmd_handle<AF_SET_SIMPLE_DESC> : immediate_cmd_process<AF_SET_SIM
 
 template<>
 struct zb_ncp::cmd_handle<NWK_FORMATION> : delayed_cmd_process<NWK_FORMATION,single_cmd_delayed> {
-    static constexpr size_t resp_buffer_size = 4;
+    static constexpr size_t resp_buffer_size = 8;
     static constexpr const char* name = "NWK_FORMATION";
     //static uint32_t channel_mask;
     static int start_delayed(const void* cmddata,uint16_t cmdlen) {
@@ -724,12 +786,25 @@ struct zb_ncp::cmd_handle<NWK_FORMATION> : delayed_cmd_process<NWK_FORMATION,sin
     static uint16_t finish_delayed(int status,uint8_t* outdata,uint16_t outlen) {
         *outdata++ = STATUS_CATEGORY_NWK;
         *outdata++ = status;
+        // ZBOSS NCP spec formation response body: NWKAddr + PANID + Page +
+        // Channel. The pre-2026-06-05 version sent ONLY zb_get_pan_id() in
+        // the first (NWKAddr) slot — zigpy-zboss <=1.2.0 and zigbee-herdsman
+        // only parse that first u16 (herdsman names it 'nwk'), so the bug was
+        // invisible; zigpy-zboss PR #73 (zigpy 0.92+ support) parses the full
+        // spec layout and its Formation waiter times out on the short frame.
+        // Trailing extra bytes are ignored by both old parsers, so emitting
+        // the full layout is backward-compatible.
+        uint16_t nwk_addr_ = 0; uint16_t pan_id_ = 0; uint8_t channel_ = 0;
         if (status == 0) {
-            uint16_t pan_id_ = zb_get_pan_id(); memcpy(outdata, &pan_id_, 2);
-        } else {
-            uint16_t pan_id_ = 0; memcpy(outdata, &pan_id_, 2);
+            nwk_addr_ = zb_get_short_address();
+            pan_id_   = zb_get_pan_id();
+            channel_  = zb_get_current_channel();
         }
-        return 4;
+        memcpy(outdata, &nwk_addr_, 2); outdata += 2;
+        memcpy(outdata, &pan_id_, 2);  outdata += 2;
+        *outdata++ = 0;        // channel page (2.4 GHz)
+        *outdata++ = channel_;
+        return 8;
     }
 };
 SINGLE_CMD_DELAYED_DECL(NWK_FORMATION)
@@ -1911,6 +1986,22 @@ struct restore_session_t {
 };
 static restore_session_t s_restore_session = { 0, 0, false };
 
+// GET_NETWORK_BACKUP RAM snapshot (pre-release hardening 2026-06-05). The
+// chunked pull used to read flash 320 times spread over the whole transfer
+// (~7-30 s); when that overlapped ZBOSS NVRAM (re)write activity shortly
+// after a boot (herdsman resets the NCP at every adapter start; heaviest
+// after a RESTORE_NETWORK reboot or a post-erase formation), single chunk
+// responses stalled >10 s and the host aborted — the long-standing v1.1.22
+// "backup timeout" follow-up, reproduced near-deterministically 2026-06-05
+// (offsets 4992-5760) during the UART-transport validation. Serving all
+// chunks from a snapshot taken at offset==0 shrinks the flash-access window
+// to one bulk read AND makes the image a consistent point-in-time copy
+// instead of a live-mutating read. Single static slot; freed when the last
+// chunk is served, reused/re-read on every offset==0. Runs on the app event
+// task only — no locking needed.
+static uint8_t* s_backup_snapshot = nullptr;
+static uint32_t s_backup_snapshot_size = 0;
+
 template <>
 struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP> {
     static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 128;
@@ -1942,6 +2033,39 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         // no longer silently truncates / over-reads (C3).
         const uint32_t total_size = nvs_part->size + zb_part->size;
 
+        // (Re)build the RAM snapshot on every session start (offset==0) so a
+        // restarted pull gets fresh data. Allocation/read failure degrades to
+        // the original per-chunk direct reads below.
+        if (offset == 0) {
+            if (s_backup_snapshot && s_backup_snapshot_size != total_size) {
+                free(s_backup_snapshot);
+                s_backup_snapshot = nullptr;
+            }
+            if (!s_backup_snapshot) {
+                s_backup_snapshot = static_cast<uint8_t*>(malloc(total_size));
+            }
+            if (s_backup_snapshot) {
+                s_backup_snapshot_size = total_size;
+                esp_err_t sre = esp_partition_read(nvs_part, 0, s_backup_snapshot, nvs_part->size);
+                if (sre == ESP_OK) {
+                    sre = esp_partition_read(zb_part, 0, s_backup_snapshot + nvs_part->size, zb_part->size);
+                }
+                if (sre != ESP_OK) {
+                    ESP_LOGE(TAG, "GET_NETWORK_BACKUP: snapshot read failed: %s -- direct reads",
+                             esp_err_to_name(sre));
+                    free(s_backup_snapshot);
+                    s_backup_snapshot = nullptr;
+                    s_backup_snapshot_size = 0;
+                }
+            } else {
+                s_backup_snapshot_size = 0;
+                ESP_LOGE(TAG, "GET_NETWORK_BACKUP: snapshot alloc failed (%lu B) -- direct reads",
+                         (unsigned long)total_size);
+            }
+            ESP_LOGI(TAG, "GET_NETWORK_BACKUP: session start total=%lu snapshot=%d",
+                     (unsigned long)total_size, s_backup_snapshot != nullptr);
+        }
+
         uint32_t len = 128;
         if (offset >= total_size) {
             len = 0;
@@ -1953,32 +2077,46 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         memcpy(payload + 4, &len,        4);
 
         if (len > 0) {
-            esp_err_t re = ESP_OK;
-            if (offset < nvs_part->size) {
-                uint32_t read_len = len;
-                if (offset + read_len > nvs_part->size) {
-                    read_len = nvs_part->size - offset;
-                }
-                re = esp_partition_read(nvs_part, offset, payload + 8, read_len);
-                if (re == ESP_OK && read_len < len) {
-                    re = esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
-                }
+            ESP_LOGD(TAG, "GET_NETWORK_BACKUP: chunk offset=%lu len=%lu",
+                     (unsigned long)offset, (unsigned long)len);
+            if (s_backup_snapshot && offset + len <= s_backup_snapshot_size) {
+                memcpy(payload + 8, s_backup_snapshot + offset, len);
             } else {
-                re = esp_partition_read(zb_part, offset - nvs_part->size, payload + 8, len);
+                esp_err_t re = ESP_OK;
+                if (offset < nvs_part->size) {
+                    uint32_t read_len = len;
+                    if (offset + read_len > nvs_part->size) {
+                        read_len = nvs_part->size - offset;
+                    }
+                    re = esp_partition_read(nvs_part, offset, payload + 8, read_len);
+                    if (re == ESP_OK && read_len < len) {
+                        re = esp_partition_read(zb_part, 0, payload + 8 + read_len, len - read_len);
+                    }
+                } else {
+                    re = esp_partition_read(zb_part, offset - nvs_part->size, payload + 8, len);
+                }
+                if (re != ESP_OK) {
+                    // Same unchecked-esp_partition_* class as M1, on the backup-READ
+                    // side: an unchecked failed read would ship stale stack bytes to
+                    // the host as a "valid" chunk with status OK -> silently corrupt
+                    // coordinator_backup.json. Report failure with len=0 instead,
+                    // mirroring the partitions-missing path above.
+                    ESP_LOGE(TAG, "GET_NETWORK_BACKUP: read failed at offset %lu: %s",
+                             (unsigned long)offset, esp_err_to_name(re));
+                    full_res->status = GENERIC_OPERATION_FAILED;
+                    len = 0;
+                    memcpy(payload + 4, &len, 4);
+                    return sizeof(generic_response_t) + 8;
+                }
             }
-            if (re != ESP_OK) {
-                // Same unchecked-esp_partition_* class as M1, on the backup-READ
-                // side: an unchecked failed read would ship stale stack bytes to
-                // the host as a "valid" chunk with status OK -> silently corrupt
-                // coordinator_backup.json. Report failure with len=0 instead,
-                // mirroring the partitions-missing path above.
-                ESP_LOGE(TAG, "GET_NETWORK_BACKUP: read failed at offset %lu: %s",
-                         (unsigned long)offset, esp_err_to_name(re));
-                full_res->status = GENERIC_OPERATION_FAILED;
-                len = 0;
-                memcpy(payload + 4, &len, 4);
-                return sizeof(generic_response_t) + 8;
-            }
+        }
+
+        // Last chunk served (or out-of-range read) — release the snapshot.
+        if (offset + len >= total_size && s_backup_snapshot) {
+            ESP_LOGI(TAG, "GET_NETWORK_BACKUP: session complete, snapshot freed");
+            free(s_backup_snapshot);
+            s_backup_snapshot = nullptr;
+            s_backup_snapshot_size = 0;
         }
 
         return sizeof(generic_response_t) + 8 + len;

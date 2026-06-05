@@ -4,10 +4,78 @@ menu "Zigbee Network Co-processor"
         bool "Host connection via USB-Serial/JTAG"
         default y
         help
-            The NCP host link is USB-Serial/JTAG only. The stock ZBOSS NCP UART
-            transport was never implemented in this firmware; the former UART
-            Kconfig options (NCP_BUS_UART_*) and transport::m_uart_queue were
-            dead and have been removed (code-review TRNPT-4).
+            The primary NCP host link is USB-Serial/JTAG. (The stock ZBOSS NCP
+            UART transport was never implemented in this firmware; the former
+            UART Kconfig options (NCP_BUS_UART_*) and transport::m_uart_queue
+            were dead and removed in code-review TRNPT-4. NCP_UART_TRANSPORT
+            below is an independent, parallel implementation.)
+
+    config NCP_UART_TRANSPORT
+        bool "Additional NCP host link on UART1 (parallel to USB)"
+        default y
+        help
+            Expose the same ZBOSS NCP frame stream on UART1 in parallel to
+            USB-Serial/JTAG, for hosts like OpenWRT routers with a TTL serial
+            header (issue #2 / discussion #1). 8N1, no flow control.
+
+            NCP->host frames follow the interface that last delivered host
+            bytes; running two talking hosts at the same time is not
+            supported (single NCP link-layer state). An idle or unserviced
+            interface never blocks the active one: writes to the non-active
+            interface are strictly non-blocking and are dropped when its TX
+            buffer is full.
+
+    if NCP_UART_TRANSPORT
+
+        config NCP_UART_TX_GPIO
+            int "UART TX GPIO"
+            default 22
+            range 0 23
+            help
+                Default GPIO22 — exposed as D4 on the Seeed XIAO ESP32-C6 and
+                a plain SDIO_DATA2 pad (SDIO slave unused by this firmware)
+                on devkits/bare modules. Pin constraints when changing: avoid
+                GPIO8/9 (boot mode straps), GPIO15 (JTAG source strap),
+                GPIO12/13 (USB D-/D+), GPIO16/17 (UART0: the ROM bootloader
+                prints a reset banner there on every reset). GPIO4/5 work on
+                bare modules (their MTMS/MTDI strap only selects the unused
+                SDIO clock edge) but are not bonded out on the XIAO.
+
+        config NCP_UART_RX_GPIO
+            int "UART RX GPIO"
+            default 23
+            range 0 23
+            help
+                Default GPIO23 — exposed as D5 on the Seeed XIAO ESP32-C6,
+                plain SDIO_DATA3 pad elsewhere; see NCP_UART_TX_GPIO for the
+                pin constraints. The firmware enables the internal pull-up so
+                an unwired RX idles quietly instead of feeding noise into the
+                NCP stream.
+
+        config NCP_UART_BAUD
+            int "UART baud rate"
+            default 115200
+            range 9600 921600
+            help
+                Must match the host side (zigbee2mqtt adapter baudrate /
+                ser2net config). 115200 is the zigbee-herdsman and
+                zigpy-zboss default.
+
+    endif
+
+    config NCP_XIAO_EXT_ANTENNA
+        bool "Seeed XIAO ESP32-C6: use the external (U.FL) antenna"
+        default n
+        help
+            The XIAO ESP32-C6 routes RF through a switch controlled by two
+            dedicated GPIOs (not on the pin header): GPIO3 enables the switch
+            control (active low), GPIO14 selects the antenna (low = internal
+            ceramic, default; high = external U.FL). With this option the
+            firmware drives GPIO3 low and GPIO14 high at boot, selecting the
+            external antenna. Leave disabled on any other board — it would
+            drive two header GPIOs to fixed levels. Source: Seeed wiki
+            "XIAO ESP32C6 Getting Started" + arduino-esp32
+            variants/XIAO_ESP32C6/pins_arduino.h (WIFI_ENABLE/WIFI_ANT_CONFIG).
 
 endmenu
 

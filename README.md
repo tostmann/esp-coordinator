@@ -34,6 +34,16 @@ The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Te
 
 This project is an actively maintained, heavily optimized evolution of the original esp-coordinator. As of 2026-05, the active upstream lives in this fork; the original `andryblack/esp-coordinator` repository is **archived and read-only** and its README points here. If you arrived via a search hit on one of the archived `andryblack` issues, see [`LEGACY_ANDRYBLACK_ISSUES.md`](LEGACY_ANDRYBLACK_ISSUES.md) for the current status of each report.
 
+### v1.3.x — UART Host Transport, XIAO ESP32-C6 Support, NCP_RESET Protocol Fix
+
+* **NEW: UART host transport, in parallel to USB** ([#2](https://github.com/tostmann/esp-coordinator/issues/2), [discussion #1](https://github.com/tostmann/esp-coordinator/discussions/1)): the NCP frame stream is now additionally available on a hardware UART — **TX = GPIO22, RX = GPIO23 (= D4/D5 on the Seeed XIAO ESP32-C6), 115200 8N1, no flow control** (all configurable via `idf.py menuconfig` → `NCP_UART_*`). This lets the coordinator hang directly off a host board's TTL serial header (OpenWRT routers, Raspberry Pi GPIO header, ser2net boxes) without using USB at all. Both interfaces are always live; responses follow whichever interface last delivered a **valid NCP frame** — random bytes from port probers such as ModemManager can neither steal the link nor corrupt the stream (signature-gated routing). Running two talking hosts at once is not supported. Validated end-to-end over a Raspberry Pi header UART with both `zigbee2mqtt` (`adapter: zboss`) and `zigpy-zboss`, including network formation, device pairing and the full 40 KB backup pull. Bonus: with an external USB-UART adapter or a host header UART, the host port survives the chip's resets — the USB-CDC `inReset` quirk class disappears entirely on this path.
+* **NEW: Seeed XIAO ESP32-C6 external-antenna option**: `CONFIG_NCP_XIAO_EXT_ANTENNA` drives the XIAO's RF-switch control pins (GPIO3 enable, GPIO14 select) to route RF to the external U.FL connector — useful for a coordinator that needs real range. Default off; by default the firmware now leaves both switch pins in a defined passive INPUT state, so the board's pulldown selects the on-board ceramic antenna and the binary stays a no-op on every other board.
+* **NCP_RESET protocol-semantics fix** (important for `reset` / factory-reset / restore flows): the firmware no longer sends an "OK" response *before* rebooting. Hosts treat that response as "reset complete" and continue immediately — everything they sent in the window before the actual reboot was killed mid-flight (this was the root cause of the long-standing "backup timeout after formation/restore" failures). Now the reboot happens right away and the **boot-ready frame after the reboot is the response** — exactly what the host's wildcard NCP_RESET matcher expects. Factory-reset → re-form and restore → resume flows now complete deterministically.
+* **NCP_RESET-over-USB freeze fixed**: the v1.1.x USB "phy detach" register writes turned out to hard-freeze the ESP32-C6 on current ESP-IDF builds (bus stall, only a power-cycle recovers) — every NCP_RESET over USB bricked the stick until replug. The writes are removed; NVRAM/factory erase now runs at the start of the *next* boot (parked via RTC memory), before the radio is active.
+* **Full-spec `NWK_FORMATION` response** (`NWKAddr` + `PANID` + channel page + channel): fixes network formation against hosts that parse the complete response layout — notably `zigpy-zboss` ≥ 2.x / Home Assistant ZHA.
+* **Consistent point-in-time backups**: `GET_NETWORK_BACKUP` now serves all chunks from a RAM snapshot taken at the first chunk, so the 40 KB image can no longer mutate while it is being pulled.
+* **Link-layer fix**: a cross-task sequence-number race between ACK generation and data frames (duplicate `packet_seq` on the wire → host-side "Unexpected packet sequence") is closed.
+
 ### v1.2.33 — Code-Review Hardening
 
 A full whole-codebase review fixed two memory-safety criticals and a batch of robustness/correctness issues. Every change was adversarially re-verified, and the build was validated end-to-end on hardware (network formation → device interview → backup) against the Zigbee2MQTT `adapter:zboss` host.
@@ -102,15 +112,17 @@ compat gaps against current zigpy / serialx, and extends ZHA's
 `RadioType` enum so **ZBOSS** appears as a selectable radio type in the
 add-integration flow.
 
-**Status as of v1.2.33**: setup gets through firmware probe / radio-type
-pick / network formation cleanly. The full end-to-end add-integration flow
-beyond that still hits additional `zigpy-zboss` bit-rot against zigpy 1.4
-that is outside this firmware's scope to fix — those gaps are tracked in
-[`kardia-as/zigpy-zboss#19`](https://github.com/kardia-as/zigpy-zboss/issues/19)
-and PR [`#74`](https://github.com/kardia-as/zigpy-zboss/pull/74) is
-addressing the first two. **For production use, the Z2M path above remains
-the recommended option.** The ZHA path is shaping up but not yet a no-rough-
-edges experience.
+**Status as of v1.3.x**: the picture has improved substantially. The
+`zigpy-zboss` maintainer is actively modernizing the library
+([kardia-as/zigpy-zboss#73](https://github.com/kardia-as/zigpy-zboss/pull/73)
+brings zigpy ≥ 0.92 / serialx support), and we have hardware-validated that
+branch against this firmware end-to-end: `ControllerApplication.new(auto_form=True)`
+on a factory-blank coordinator and restart-on-formed-network both succeed —
+over USB and over the new UART transport. The v1.3.x firmware fixes that
+made this work (full-spec `NWK_FORMATION` response, the NCP_RESET
+freeze/semantics fixes) are in this release. **For production use, the Z2M
+path above remains the recommended option** until the upstream library
+release lands, after which `tostmann/zha-zboss-esp` will be re-pinned.
 
 ## Configuration Example (zigbee2mqtt)
 
@@ -123,6 +135,27 @@ serial:
 advanced:
   transmit_power: 20
 ```
+
+### UART instead of USB (since v1.3.x)
+
+Wire the host's serial header to the coordinator — three wires, 3.3 V levels. Firmware default: the coordinator **transmits on GPIO22** and **receives on GPIO23**:
+
+| Host (OpenWRT / Raspberry Pi header UART / USB-UART adapter) | ESP32-C6 default pin | XIAO ESP32-C6 silk |
+|---|---|---|
+| Host **RX** ← | **GPIO22** (coordinator TX) | D4 |
+| Host **TX** → | **GPIO23** (coordinator RX) | D5 |
+| GND | GND | GND |
+
+If you get no response, the two data lines are the usual suspect — swap them. Quick check: the coordinator emits a 7-byte boot frame `DE AD 05 00 06 01 8F` on its TX line a moment after every reset.
+
+```yaml
+serial:
+  port: /dev/ttyAMA0        # or /dev/ttyUSBx for a USB-UART adapter, or ser2net → tcp://...
+  adapter: zboss
+  baudrate: 115200
+```
+
+Pins and baud rate are build-time configurable (`menuconfig` → *Zigbee Network Co-processor*). USB-Serial/JTAG stays fully functional in parallel — flashing and recovery keep working over USB while the NCP link runs on the UART.
 
 
 ## Flashing Instructions (Web Installer & CLI)

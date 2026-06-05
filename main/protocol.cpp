@@ -51,6 +51,17 @@ static uint8_t next_seq(uint8_t seq) {
 }
 
 void protocol::send_ack(const ncp_header_t& hdr) {
+	// B2 (ported from the wifi-coex branch 2026-06-05, surfaced there by an
+	// adversarial review and live-verified on its build 1.2.36): this path
+	// runs on the app task while send_data_int advances m_tx_seq on the
+	// ZBOSS task under m_tx_sem. The previously UNLOCKED read-modify-write
+	// here could lose an update and put two frames with the SAME packet_seq
+	// on the wire — herdsman then logs "Unexpected packet sequence". Hold
+	// m_tx_sem across the RMW + send, matching send_data_int. Lock order
+	// m_tx_sem -> m_input_sem (inside transport::send) is the same as
+	// send_data_int's; no deadlock — the m_input_buf capacity wait is
+	// bounded and its drainer (app task) never parks on m_tx_sem first.
+	utils::sem_lock l(m_tx_sem);
 	ncp_header_t rsp = {
 		.signature = {0xde,0xad},
 		.packet_len = 5,
@@ -72,6 +83,8 @@ void protocol::send_ack(const ncp_header_t& hdr) {
 }
 
 void protocol::send_nack(const ncp_header_t& hdr) {
+	// B2: same unlocked-RMW race as send_ack above — see the comment there.
+	utils::sem_lock l(m_tx_sem);
 	ncp_header_t rsp = {
 		.signature = {0xde,0xad},
 		.packet_len = 5,
