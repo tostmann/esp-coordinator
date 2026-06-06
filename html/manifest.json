@@ -1,6 +1,7 @@
 {
   "name": "ESP-Coordinator",
   "version": "v1.3.49",
+  "funding_url": "https://paypal.me/busware",
   "builds": [
     {
       "chipFamily": "ESP32-C6",
