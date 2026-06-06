@@ -260,7 +260,38 @@ bool zb_ncp::start_zigbee_stack() {
     }
 }
 
+// ZBOSS "big lock" — the esp-zboss-lib port layer's recursive mutex
+// (s_zb_mutex in zb_esp_osif.c; zb_esp_osif_lock_acquire/release are public
+// API, declared in zb_osif_platform.h). The ZBOSS task holds it across every
+// scheduler iteration (released only around its select() wait), because the
+// ZBOSS core is NOT thread-safe: its interrupt-bracketing primitive is a
+// plain global byte (g_dis_inter_flag) around vPortEnter/ExitCritical, with
+// a preemption window between the critical exit and the flag clear (verified
+// by disassembly 2026-06-06). esp-zigbee-lib's public API enforces the same
+// rule via esp_zb_lock_acquire(); the raw-ZBOSS NCP design inherited from
+// upstream never took the lock, so every zb_* call our command handlers make
+// from the app task raced the ZBOSS task's own brackets. Under interview
+// bursts (many host ZDO commands while INDICATIONs stream out) the race
+// fired reproducibly on the wifi-coex branch: 'assert failed:
+// vPortExitCritical port.c:618 (port_uxCriticalNesting[0] > 0)' on
+// ncp_zb_task — 4 panics, all mid-interview; USB timing makes it rarer but
+// the race is identical here. The dispatch below is the single app-task
+// entry into ZBOSS, so one guard serialises all of it. Lock order on the
+// app task becomes s_zb_mutex -> m_tx_sem -> m_input_sem — identical to the
+// ZBOSS task's own callback path, so no deadlock is introduced. Validated on
+// the branch with a 10/10 interview-hammer (~80% crash rate before).
+namespace {
+struct zboss_lock_guard {
+	zboss_lock_guard() { zb_esp_osif_lock_acquire(portMAX_DELAY); }
+	~zboss_lock_guard() { zb_esp_osif_lock_release(); }
+};
+}  // namespace
+
 void zb_ncp::on_rx_data(const void* data,size_t size) {
+	// Serialise against the ZBOSS task before any handler can touch zb_*
+	// state (see the big-lock comment above).
+	zboss_lock_guard zb_lock;
+
 	// Guard BEFORE dereferencing cmd: a data packet with packet_len 7..11 hands
 	// us data_len 0..4 (< sizeof(cmd_t)). Reading cmd.type/command_id from such
 	// a sub-header frame OOB-reads the RX-buffer tail, and `size - sizeof(cmd_t)`

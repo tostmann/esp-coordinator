@@ -1,4 +1,5 @@
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_attr.h"
 #include "esp_partition.h"
 #include "app.h"
@@ -80,6 +81,13 @@ static void rf_switch_default_input(void)
 
 extern "C" void app_main(void)
 {
+    // Reset-cause forensics (free under LOG_NONE): some boards' eFuses
+    // suppress the ROM's rst:0x banner, making brownouts, panics and
+    // watchdog resets indistinguishable from clean boots on a console.
+    // ESP_RST_: 1=poweron 3=sw 4=panic 5=int_wdt 6=task_wdt 7=other_wdt
+    // 9=brownout 11=usb.
+    ESP_LOGI("BOOT", "reset reason: %d", (int)esp_reset_reason());
+
     handle_pending_erase();
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
     select_external_antenna();

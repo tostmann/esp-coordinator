@@ -121,7 +121,16 @@ void transport::rx_pump(const uint8_t* data, int readed) {
             break;
         }
         ncp_event.size = sent;
-        app::send_event(ncp_event);
+        // Bounded retry on a momentarily-full event queue: the bytes are
+        // already committed to m_output_buf, so a dropped event would orphan
+        // them and shift the byte/event pairing. Retrying HERE is safe —
+        // rx_pump only ever runs on our own RX tasks (USB/UART), never on
+        // the ZBOSS task (app::send_event itself must stay non-blocking for
+        // that caller — see the critical-section panic note there).
+        int tries = RINGBUF_TIMEOUT_MS / 10;
+        while (app::send_event(ncp_event) != ESP_OK && tries-- > 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
         off += sent;
     }
 }

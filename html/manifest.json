@@ -1,6 +1,6 @@
 {
   "name": "ESP-Coordinator",
-  "version": "v1.3.45",
+  "version": "v1.3.49",
   "builds": [
     {
       "chipFamily": "ESP32-C6",

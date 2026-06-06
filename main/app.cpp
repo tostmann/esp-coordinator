@@ -28,7 +28,21 @@ esp_err_t app::send_event_int(const ctx_t& ctx) {
     if (xPortInIsrContext() == pdTRUE) {
         ret = xQueueSendFromISR(m_queue, &ctx, NULL);
     } else {
+        // MUST stay non-blocking (timeout 0): this path is reached from the
+        // ZBOSS task via send_cmd_data -> protocol::send_data ->
+        // transport::send, and ZBOSS invokes that from INSIDE its
+        // zb_osif_disable_all_interrupts/enable critical window (MAC logic
+        // iteration). A blocking xQueueSend here lets the scheduler switch
+        // away inside the critical section and corrupts the per-CPU critical
+        // nesting count -> vPortExitCritical assert panic on ncp_zb_task
+        // (reproduced on the wifi-coex branch 2026-06-06). Callers that CAN
+        // safely wait (the transport RX tasks) implement their own bounded
+        // retry around this call instead (transport::rx_pump).
         ret = xQueueSend(m_queue, &ctx, 0);
+        if (ret != pdTRUE) {
+            ESP_LOGE(TAG, "event queue full, event %d (size %u) dropped",
+                     ctx.event, (unsigned)ctx.size);
+        }
     }
 	
     return (ret == pdTRUE) ? ESP_OK : ESP_FAIL ;
