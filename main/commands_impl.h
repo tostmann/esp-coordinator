@@ -1,6 +1,7 @@
 #include "esp_partition.h"
 #include "nvs_flash.h"
 #include "app.h"
+#include "boot_guard.h"
 #include "version.h"
 
 #include "commands_helpers.h"
@@ -97,6 +98,11 @@ static void ncp_reset_deferred_task(void* arg) {
         extern uint32_t g_pending_ncp_erase;
         g_pending_ncp_erase = 0xFAC70000u | options;
     }
+    // WEDGE-1: a host-commanded reset is a supervised restart — clear the
+    // early-boot failure breadcrumb so a stick parked in boot-guard safe
+    // mode exits it on this reboot (with freshly erased NVRAM when
+    // options=2, i.e. the remote un-wedge path).
+    boot_guard::clear();
     // Force a USB disconnect before esp_restart so the host's CDC layer
     // sees the device drop off the bus. ESP32-C6's USB-Serial-JTAG endpoint
     // stays enumerated across esp_restart() (the ROM bootloader re-attaches
@@ -320,6 +326,24 @@ struct zb_ncp::cmd_handle<SET_PAN_ID> : immediate_cmd_process<SET_PAN_ID>,
 		// the stack can't actually run on.
 		if (arg == 0xFFFF) {
 			status = GENERIC_INVALID_PARAMETER_1;
+			return;
+		}
+		// PAN-1: on a formed/joined network zb_set_pan_id() only rewrites the
+		// PIB-cache mirror that zb_get_pan_id() reads — the NWK layer, the
+		// on-air PAN and the NVRAM dataset all stay on the operational value.
+		// The result was a getter that lied until the next reboot: the host
+		// (zigpy-zboss writes its desired settings AFTER forming) saw its
+		// requested PAN echoed back while the device ran — and persisted —
+		// another one; after a reboot the PAN appeared to "morph" (measured:
+		// runtime echo 0xF675 vs 0x32B1 on NVRAM and post-reboot; the
+		// Formation.Rsp had reported 0x32B1 correctly all along). Changing
+		// the 16-bit PAN of a running network is not supported by the stack,
+		// so reject instead of poisoning the mirror. Pre-formation writes
+		// stay allowed — ZBOSS consumes the PIB-cache value as the requested
+		// PAN at formation (zigbee-herdsman sets it BEFORE NWK_FORMATION and
+		// is unaffected).
+		if (zb_zdo_joined()) {
+			status = GENERIC_OPERATION_FAILED;
 			return;
 		}
 		zb_set_pan_id(arg);

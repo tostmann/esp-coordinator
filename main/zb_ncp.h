@@ -63,6 +63,12 @@ public:
 	// 0xFFFF/0xFF defaults decides to formNetwork() and wipes paired devices.
 	// See andryblack/esp-coordinator#5 / #19, z2m #26152. Idempotent.
 	static bool start_zigbee_stack();
+	// The synthetic boot-ready NCP_RESET response (tsn=0xFF). Normally sent
+	// from continue_zboss once the NVRAM dataset is loaded; in boot-guard
+	// safe mode app::start_int sends it instead (ZBOSS never starts there),
+	// so hosts proceed to their first getters and fail VISIBLY on
+	// GENERIC_BLOCKED rather than timing out on a silent port.
+	static void send_boot_ready_frame();
 	static void on_rx_data(const void* data,size_t size);
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);

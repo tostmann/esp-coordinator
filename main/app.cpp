@@ -1,4 +1,5 @@
 #include "app.h"
+#include "boot_guard.h"
 #include "transport.h"
 #include "protocol.h"
 #include "zb_ncp.h"
@@ -138,17 +139,30 @@ esp_err_t app::start_int() {
     uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
     transport::send(raw_data, sizeof(raw_data));
 
-    // Cold-boot panID race: start the ZBOSS dispatch task here, after the
-    // transport polling task is up and the event loop is about to drain
-    // m_queue. Triggers zboss_main_loop -> SKIP_STARTUP -> continue_zboss,
-    // which sends the synthetic NCP_RESET response and kicks off
-    // NETWORK_STEERING so the persisted NVRAM-stored network is actually
-    // active by the time z2m's first GET_JOINED query arrives. Without this
-    // the task only spins up lazily when the host issues NWK_FORMATION /
-    // NWK_START_WITHOUT_FORMATION — but z2m doesn't issue those at startup
-    // (it queries first), and on stale defaults it formNetwork()s and wipes
-    // every paired device.  See andryblack/esp-coordinator#5/#19, z2m #26152.
-    zb_ncp::start_zigbee_stack();
+    if (boot_guard::safe_mode()) {
+        // WEDGE-1 safe mode: repeated early-boot failures — bring up the
+        // host link WITHOUT the ZBOSS stack so the stick stays reachable and
+        // recoverable (dispatch restricted in zb_ncp::on_rx_data). Send the
+        // boot-ready frame here since continue_zboss will never run; hosts
+        // then fail visibly on GENERIC_BLOCKED getters instead of a silent
+        // open-port timeout. NO early return — the event pump at the end of
+        // this function is what drains m_queue (incl. these very frames and
+        // every command response); returning here would leave the link mute.
+        ESP_LOGE(TAG, "boot guard SAFE MODE: ZBOSS not started");
+        zb_ncp::send_boot_ready_frame();
+    } else {
+        // Cold-boot panID race: start the ZBOSS dispatch task here, after the
+        // transport polling task is up and the event loop is about to drain
+        // m_queue. Triggers zboss_main_loop -> SKIP_STARTUP -> continue_zboss,
+        // which sends the synthetic NCP_RESET response and kicks off
+        // NETWORK_STEERING so the persisted NVRAM-stored network is actually
+        // active by the time z2m's first GET_JOINED query arrives. Without this
+        // the task only spins up lazily when the host issues NWK_FORMATION /
+        // NWK_START_WITHOUT_FORMATION — but z2m doesn't issue those at startup
+        // (it queries first), and on stale defaults it formNetwork()s and wipes
+        // every paired device.  See andryblack/esp-coordinator#5/#19, z2m #26152.
+        zb_ncp::start_zigbee_stack();
+    }
 
     // The synthetic NCP_RESET *response* (cmd=0x0002, tsn=0xFF, status=OK)
     // used to be sent here, but doing so before ZBOSS finished loading its

@@ -1,4 +1,5 @@
 #include "zb_ncp.h"
+#include "boot_guard.h"
 #include "commands.h"
 #include "protocol.h"
 #include "statuses.h"
@@ -288,6 +289,48 @@ struct zboss_lock_guard {
 }  // namespace
 
 void zb_ncp::on_rx_data(const void* data,size_t size) {
+	// WEDGE-1 safe mode: ZBOSS was never started (repeated early-boot
+	// failure, see boot_guard.h). Serve only stack-free commands and answer
+	// everything else GENERIC_BLOCKED so hosts fail visibly. Deliberately
+	// NO zboss_lock_guard on this path — the ZBOSS osif lock belongs to a
+	// stack that does not exist this boot.
+	if (boot_guard::safe_mode()) {
+		if (size < sizeof(cmd_t)) {
+			ESP_LOGE(TAG,"cmd frame too short: %u",unsigned(size));
+			return;
+		}
+		const cmd_t& cmd = *static_cast<const cmd_t*>(data);
+		if (cmd.type != REQUEST) {
+			return;
+		}
+		auto len = size - sizeof(cmd_t);
+		auto buf = static_cast<const uint8_t*>(data)+sizeof(cmd_t);
+		switch (cmd.command_id) {
+		case GET_MODULE_VERSION:
+			// Stack-free: version macros + zboss_version_get() (a baked-in
+			// constant accessor, no stack state).
+			cmd_handle<GET_MODULE_VERSION>::process(cmd, buf, len);
+			break;
+		case NCP_RESET:
+			// Stack-free since v1.3.45 (RTC pending-erase flag +
+			// esp_restart, erase executes pre-ZBOSS at next boot). This is
+			// the remote recovery path: options=2 factory-erases the NVRAM
+			// a wedged stick may be choking on.
+			cmd_handle<NCP_RESET>::process(cmd, buf, len);
+			break;
+		default: {
+			uint8_t outdata[2+sizeof(zb_ncp::cmd_t)];
+			zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
+			*out_cmd = cmd;
+			out_cmd->type = RESPONSE;
+			outdata[0+sizeof(zb_ncp::cmd_t)] = STATUS_CATEGORY_GENERIC;
+			outdata[1+sizeof(zb_ncp::cmd_t)] = GENERIC_BLOCKED;
+			zb_ncp::send_cmd_data( outdata, sizeof(outdata) );
+		} break;
+		}
+		return;
+	}
+
 	// Serialise against the ZBOSS task before any handler can touch zb_*
 	// state (see the big-lock comment above).
 	zboss_lock_guard zb_lock;
@@ -445,8 +488,30 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
   return ZB_TRUE;
 }
 
+void zb_ncp::send_boot_ready_frame() {
+    static const uint8_t boot_ready_frame[] = {
+        0xDE, 0xAD,             // signature
+        0x0E, 0x00,             // packet_len = 14
+        0x06,                   // packet_type = ZBOSS_NCP_API_HL
+        0xC0,                   // flags: first_fragment=1, last_fragment=1
+        0x5D,                   // header CRC8
+        0x50, 0xD4,             // payload CRC16
+        0x00,                   // version
+        0x01,                   // type = RESPONSE
+        0x02, 0x00,             // command_id = NCP_RESET (0x0002, LE)
+        0xFF,                   // tsn = 0xFF (unsolicited-boot sentinel)
+        0x00, 0x00              // CATEGORY_GENERIC, GENERIC_OK
+    };
+    transport::send(boot_ready_frame, sizeof(boot_ready_frame));
+}
+
 void zb_ncp::continue_zboss(uint8_t arg) {
     ESP_LOGI(TAG,"continue_zboss");
+
+    // WEDGE-1: ZBOSS reached SKIP_STARTUP with the NVRAM dataset loaded —
+    // this boot is past the early-init hang class. Clear the failure
+    // breadcrumb and cancel the boot deadline.
+    boot_guard::mark_zboss_alive();
 
     // Cold-boot race fix (andryblack/esp-coordinator#5 + regression in #19).
     // The synthetic NCP_RESET response (cmd=0x0002, type=RESPONSE, tsn=0xFF,
@@ -465,20 +530,7 @@ void zb_ncp::continue_zboss(uint8_t arg) {
     // into init_int() (we have that) but the dataset load itself runs on
     // the dedicated ZBOSS task inside zboss_main_loop, so PR#6 alone left
     // a race window — closed by deferring the boot-ready frame.
-    static const uint8_t boot_ready_frame[] = {
-        0xDE, 0xAD,             // signature
-        0x0E, 0x00,             // packet_len = 14
-        0x06,                   // packet_type = ZBOSS_NCP_API_HL
-        0xC0,                   // flags: first_fragment=1, last_fragment=1
-        0x5D,                   // header CRC8
-        0x50, 0xD4,             // payload CRC16
-        0x00,                   // version
-        0x01,                   // type = RESPONSE
-        0x02, 0x00,             // command_id = NCP_RESET (0x0002, LE)
-        0xFF,                   // tsn = 0xFF (unsolicited-boot sentinel)
-        0x00, 0x00              // CATEGORY_GENERIC, GENERIC_OK
-    };
-    transport::send(boot_ready_frame, sizeof(boot_ready_frame));
+    zb_ncp::send_boot_ready_frame();
 
     zb_af_set_data_indication(data_indication);
 
@@ -502,7 +554,21 @@ void zb_ncp::continue_zboss(uint8_t arg) {
         set_channel_mask(instance().m_channels_mask);
         bdb_start_top_level_commissioning(ZB_BDB_NETWORK_FORMATION);
     } else {
-        bdb_start_top_level_commissioning(ZB_BDB_NETWORK_STEERING);
+        // BOOT-1: plain boot (no pending formation, no restore). Run ONLY the
+        // BDB initialization machine: commissioned -> network resume from
+        // NVRAM (ZB_BDB_SIGNAL_DEVICE_REBOOT), factory-new -> idle waiting
+        // for host commands (ZB_BDB_SIGNAL_DEVICE_FIRST_START). This is the
+        // standard esp-zigbee pattern at SKIP_STARTUP (all upstream examples).
+        // The previous ZB_BDB_NETWORK_STEERING additionally ran
+        // steering-on-a-network after the resume, which broadcasts
+        // Mgmt_Permit_Joining(bdbcMinCommissioningTime = 180 s) — observed on
+        // the bench as "Network open for 180 seconds" ~6 s after boot with NO
+        // host connected (and closing exactly 180 s later). An NCP must not
+        // self-open the network; permit join is the host's call
+        // (NWK_PERMIT_JOINING / ZDO_PERMIT_JOINING_REQ). Note: remote devices
+        // broadcasting Mgmt_Permit_Joining after THEIR steering still open us
+        // for 180 s — that is spec-compliant Zigbee and unaffected here.
+        bdb_start_top_level_commissioning(ZB_BDB_INITIALIZATION);
     }
 }
 
@@ -596,12 +662,16 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
         ESP_LOGD(TAG,"ZB_BDB_SIGNAL_FORMATION");
         zb_ncp::cmd_handle<NWK_FORMATION>::response(status);
         if (success) {
-            bdb_start_top_level_commissioning(ZB_BDB_NETWORK_STEERING);
+            // BOOT-1: the steering kick that used to follow a successful
+            // formation opened the fresh network for 180 s without any host
+            // command (esp-zigbee standalone-example pattern, wrong for an
+            // NCP). Formation completion needs no steering pass — the
+            // network is operational; whether/when to open it is the host's
+            // decision via NWK_PERMIT_JOINING. Also covers the
+            // restore-forced formation path (s_restore_applied).
             ESP_LOGI(TAG, "Formed network successfully");
-        } else {
-            
         }
- 
+
         break;
 
     
