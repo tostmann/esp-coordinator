@@ -53,3 +53,4 @@
 # build_number.txt.tmp). Normally removed by os.replace; a stale one left by a
 # mid-write crash must not be swept into a snapshot by the hook's `git add -A`.
 *.tmp
+__pycache__/

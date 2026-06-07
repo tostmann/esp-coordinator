@@ -12,6 +12,12 @@ private:
 		uint16_t packet_len;
 		uint8_t packet_type;
 		uint8_t is_ack: 1;
+		// On the wire this bit is the spec's RETRANSMIT flag. Its meaning
+		// depends on is_ack: ACK+retransmit = NACK ("resend frame ack_seq");
+		// DATA+retransmit = "this data frame is a retransmission" (host did
+		// not see our ACK, or the original frame was lost). The legacy field
+		// name is_nack only describes the first case — see DUP-1 in
+		// protocol.cpp for the data-frame case.
 		uint8_t is_nack: 1;
 		uint8_t packet_seq: 2;
 		uint8_t ack_seq: 2;
@@ -39,6 +45,12 @@ private:
 	uint8_t m_rx_buffer[RX_BUFFER_SIZE];
 	size_t m_rx_buffer_pos;
 	uint8_t m_tx_seq;
+	// DUP-1 duplicate-drop state: packet_seq of the last ACCEPTED (ACKed +
+	// dispatched) host data frame. Only touched on the app task (single
+	// consumer of on_rx_packet) — no locking needed. m_last_rx_seq_valid
+	// gates the very first frame after boot (any seq is fresh then).
+	uint8_t m_last_rx_seq;
+	bool m_last_rx_seq_valid;
 
 	uint8_t m_tx_buffer[TX_BUFFER_SIZE];
 	SemaphoreHandle_t m_tx_sem;        /*!< A semaphore handle send_data, becouse it use buffer */

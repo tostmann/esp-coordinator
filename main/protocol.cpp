@@ -140,10 +140,11 @@ esp_err_t protocol::send_data_int(const void* data,size_t size) {
 
 void protocol::on_rx_packet(const ncp_header_t& hdr,const void* data,size_t data_size) {
 	if (hdr.is_ack) {
-		// ack received
-	} 
-	if (hdr.is_nack) {
-		ESP_LOGE(TAG,"NACK received, retransmit not supported");
+		// ACK (or, with the retransmit bit set, NACK) from the host for one
+		// of OUR frames. Retransmitting our frames is not implemented.
+		if (hdr.is_nack) {
+			ESP_LOGE(TAG,"NACK received, retransmit not supported");
+		}
 		return;
 	}
 	if (!data)
@@ -153,9 +154,26 @@ void protocol::on_rx_packet(const ncp_header_t& hdr,const void* data,size_t data
 		send_nack(hdr);
 		return;
 	}
-	if (!hdr.is_ack) {
+	// DUP-1: on a DATA frame the is_nack bit position is the spec's
+	// RETRANSMIT flag — the host re-sent this frame because it did not see
+	// our ACK (or the original frame was lost on the wire). zigpy-zboss
+	// >= 2.0.0 and zigbee-herdsman both retransmit with a STABLE packet_seq
+	// + the retransmit flag on a ~1 s ACK timeout. Pre-DUP-1 behaviour was
+	// the worst of both worlds: the early `if (hdr.is_nack) return;` above
+	// dropped every flagged retransmission WITHOUT re-ACK and WITHOUT
+	// dispatch, so a host retry could never succeed (and an unflagged
+	// duplicate would have executed the command twice).
+	// Now: already-accepted seq -> re-ACK (the lost-ACK case) but do NOT
+	// dispatch again; unseen seq -> first delivery (the lost-frame case),
+	// accept normally.
+	if (hdr.is_nack && m_last_rx_seq_valid && hdr.packet_seq == m_last_rx_seq) {
+		ESP_LOGW(TAG,"duplicate data frame seq=%d (retransmit) — re-ACK, drop",int(hdr.packet_seq));
 		send_ack(hdr);
+		return;
 	}
+	send_ack(hdr);
+	m_last_rx_seq = hdr.packet_seq;
+	m_last_rx_seq_valid = true;
 	app::on_rx_data(data,data_size);
 }
 
@@ -259,6 +277,13 @@ esp_err_t protocol::init_int() {
 	// implementations treat as duplicate-drop. next_seq() then cycles
 	// 1->2->3->1 (seq 0 only used at boot).
 	m_tx_seq = 1;
+	// DUP-1: no host data frame accepted yet — first frame after boot is
+	// fresh regardless of its seq. NOTE for the wifi-coex merge: the TCP
+	// transport's reset_link_state() must ALSO clear these two on a fresh
+	// accept, or a stale seq from the previous TCP session could eat the
+	// first flagged retransmission of the new one.
+	m_last_rx_seq = 0;
+	m_last_rx_seq_valid = false;
 	m_tx_sem = xSemaphoreCreateMutex();
     if (!m_tx_sem) {
         ESP_LOGE(TAG, "Input semaphore create error");
