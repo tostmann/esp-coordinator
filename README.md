@@ -80,6 +80,22 @@ A full whole-codebase review fixed two memory-safety criticals and a batch of ro
 * **Modern ZBOSS SDK:** Fully ported to ZBOSS SDK v1.6.x.
 
 
+## 🧪 Experimental: native Wi-Fi (coexistence, Mode B)
+
+A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostmann/esp-coordinator/tree/wifi-coex)) lets the coordinator **join your Wi-Fi itself** and expose the ZBOSS NCP over an on-device **TCP server** — no USB host, no ser2net/socat bridge. Zigbee2MQTT then connects with `port: tcp://<device-ip>:6638` and `adapter: zboss`.
+
+👉 **[Experimental WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**
+
+* **Provisioning:** flash in the browser, then enter your Wi-Fi in the same flow (Improv-Serial). The device saves it and reboots onto your network. After provisioning, the flasher's "Visit Device" link opens a small setup page served by the coordinator itself.
+* **Re-configure Wi-Fi later:** power-cycle and, within the first 120 s, use "Change Wi-Fi" in the flasher — no reflash needed.
+* **Discovery:** mDNS `esp-zboss-coord.local:6638`, or the device's DHCP IP.
+* **Required host image:** `ghcr.io/tostmann/zigbee2mqtt-esp32:latest` — it carries the longer timeouts the single-radio TCP link needs.
+
+> ⚠️ **Why "experimental":** the ESP32-C6 has a single 2.4 GHz radio time-shared between Wi-Fi and 802.15.4 Zigbee (software coexistence). Espressif rates the "Wi-Fi-STA + always-on coordinator" case as supported-but-unstable, so coexistence quality depends on your RF environment. Use a spare stick / test network, **not** a production setup — and please report how it went on [**Discussion #1**](https://github.com/tostmann/esp-coordinator/discussions/1). Backup/restore over TCP is degraded (use the stable USB build for a full backup).
+
+The stable USB / UART firmware described in this README (and the main flasher) is unchanged.
+
+
 ## Zigbee2MQTT Integration & Hardware Migration
 
 While this coordinator works perfectly with the standard Zigbee2MQTT release, **we highly recommend using our customized Docker image** (`ghcr.io/tostmann/zigbee2mqtt-esp32:latest`).
@@ -166,6 +182,8 @@ You can flash the firmware directly from your browser using our Web Serial Flash
 👉 **[Launch ESP-Coordinator Web Flasher](https://install.busware.de/zboss/)** 
 
 *(Supported Browsers: Chrome, Edge, Opera)*
+
+> 🧪 **Experimental — want the coordinator on Wi-Fi instead of USB?** Try the **[native WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**: the ESP32-C6 joins your Wi-Fi itself and serves the NCP over TCP (no USB host, no ser2net/socat). It's a testground build — see [Experimental: native Wi-Fi (coexistence)](#-experimental-native-wi-fi-coexistence-mode-b) below, and please report back on [Discussion #1](https://github.com/tostmann/esp-coordinator/discussions/1).
 
 ### 2. Manual CLI Flashing
 Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, OTA data, and the app.
