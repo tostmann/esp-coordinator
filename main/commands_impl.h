@@ -504,21 +504,43 @@ struct zb_ncp::cmd_handle<SET_NWK_KEY> : immediate_cmd_process<SET_NWK_KEY>,
 //         {name: 'index3', type: DataType.UINT8},
 //     ],
 // },
-// struct GET_NWK_KEYS_resp_t {
-// 	uint8_t nwkKey1[16];
-// 	uint8_t index1;
-// 	uint8_t nwkKey2[16];
-// 	uint8_t index2;
-// 	uint8_t nwkKey3[16];
-// 	uint8_t index3;
-// } __attribute__((packed));
-// template <>
-// struct zb_ncp::cmd_handle<GET_NWK_KEYS> : immediate_cmd_process<GET_NWK_KEYS>,
-// 		general_status_res<GET_NWK_KEYS,GET_NWK_KEYS_resp_t> {
-// 	static void process_status_res(ncp_generic_status_t& status, GET_NWK_KEYS_resp_t* res) {
-		
-//     }
-// };
+struct GET_NWK_KEYS_resp_t {
+	uint8_t nwkKey1[16];
+	uint8_t index1;
+	uint8_t nwkKey2[16];
+	uint8_t index2;
+	uint8_t nwkKey3[16];
+	uint8_t index3;
+} __attribute__((packed));
+// esp-zboss-lib exposes no public getter for the active network key, and for an
+// NCP the host-side key is pure bookkeeping: the stack does all crypto itself,
+// so the running network is unaffected by what we report here. The only consumer
+// is zigpy-zboss' load_network_info(), which since v2.0.2 hard-aborts the whole
+// connect when GET_NWK_KEYS returns a blank (all-0x00/all-0xFF) key — that abort
+// is the bug this handler fixes. We deliberately return a fixed, recognizable
+// placeholder rather than the real key:
+//   * it clears zigpy's blank-key guard, so resume/connect succeeds, and
+//   * being obviously not a real key, it does not pretend the resulting ZHA
+//     network backup is restorable — which it is not against this firmware: the
+//     restore path (write_network_info) needs NVRAM_WRITE(ZB_IB_COUNTERS) to
+//     restore the NWK frame counter, which we do not implement, so devices have
+//     to be re-paired regardless of the key.
+// herdsman's zboss adapter never queries this command (supportsBackup()=false);
+// real backup/restore goes through GET_NETWORK_BACKUP (0x99) / RESTORE_NETWORK
+// (0x9A) — a full NVRAM snapshot that already contains the real key.
+template <>
+struct zb_ncp::cmd_handle<GET_NWK_KEYS> : immediate_cmd_process<GET_NWK_KEYS>,
+		general_status_res<GET_NWK_KEYS,GET_NWK_KEYS_resp_t> {
+	static void process_status_res(ncp_generic_status_t& status, GET_NWK_KEYS_resp_t* res) {
+		(void)status; // left at GENERIC_OK by the general_status_res mixin
+		static const uint8_t placeholder[16] = {
+			'E','S','P','-','Z','B','O','S','S','-','N','O','-','K','E','Y'
+		};
+		::memset(res, 0, sizeof(*res));
+		::memcpy(res->nwkKey1, placeholder, sizeof(placeholder));
+		res->index1 = 0; // key2/key3 slots stay all-zero, index2/index3 = 0
+	}
+};
 
 // Get Extended Pan ID
 // [CommandId.GET_EXTENDED_PAN_ID]: {
