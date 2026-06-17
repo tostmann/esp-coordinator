@@ -24,6 +24,7 @@
 /idf_env.sh
 /binaries/*
 !/binaries/factory.bin
+!/binaries/factory-c5.bin
 /main/*.orig
 /main/*.rej
 

@@ -1,6 +1,6 @@
 {
   "name": "ESP-Coordinator",
-  "version": "v1.3.57",
+  "version": "v1.4.0",
   "funding_url": "https://paypal.me/busware",
   "builds": [
     {
@@ -8,6 +8,15 @@
       "parts": [
         {
           "path": "esp-coordinator-esp32c6-factory.bin",
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-C5",
+      "parts": [
+        {
+          "path": "esp-coordinator-esp32c5-factory.bin",
           "offset": 0
         }
       ]

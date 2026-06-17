@@ -134,6 +134,12 @@ void clear()
 
 }  // namespace boot_guard
 
+// The XIAO RF-antenna-switch handling below is ESP32-C6-only. Both branches
+// drive GPIO3 and GPIO14, and on the ESP32-C5 GPIO14 is USB_D+ — reconfiguring
+// it as a GPIO disables the USB-Serial/JTAG controller that carries the NCP
+// link (and the flash path). On the C5 these pins are therefore left untouched
+// in their reset state, so USB stays alive.
+#if CONFIG_IDF_TARGET_ESP32C6
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
 // Seeed XIAO ESP32-C6 RF antenna switch (pins NOT on the module header):
 // GPIO3 low enables the switch control, GPIO14 selects the antenna
@@ -173,6 +179,7 @@ static void rf_switch_default_input(void)
     gpio_config(&io);
 }
 #endif
+#endif  // CONFIG_IDF_TARGET_ESP32C6
 
 extern "C" void app_main(void)
 {
@@ -185,11 +192,13 @@ extern "C" void app_main(void)
 
     boot_guard::init();
     handle_pending_erase();
+#if CONFIG_IDF_TARGET_ESP32C6
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
     select_external_antenna();
 #else
     rf_switch_default_input();
 #endif
+#endif  // CONFIG_IDF_TARGET_ESP32C6
     ESP_ERROR_CHECK(app::init());
     ESP_ERROR_CHECK(app::start());
 }

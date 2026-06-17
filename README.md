@@ -181,15 +181,19 @@ You can flash the firmware directly from your browser using our Web Serial Flash
 
 👉 **[Launch ESP-Coordinator Web Flasher](https://install.busware.de/zboss/)** 
 
-*(Supported Browsers: Chrome, Edge, Opera)*
+*(Supported Browsers: Chrome, Edge, Opera. The flasher auto-detects your chip and serves the matching image for **ESP32-C6** and **ESP32-C5**.)*
 
 > 🧪 **Experimental — want the coordinator on Wi-Fi instead of USB?** Try the **[native WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**: the ESP32-C6 joins your Wi-Fi itself and serves the NCP over TCP (no USB host, no ser2net/socat). It's a testground build — see [Experimental: native Wi-Fi (coexistence)](#-experimental-native-wi-fi-coexistence-mode-b) below, and please report back on [Discussion #1](https://github.com/tostmann/esp-coordinator/discussions/1).
 
 ### 2. Manual CLI Flashing
-Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your ESP32-C6. This single binary includes the bootloader, partition table, OTA data, and the app.
+Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your board. The single binary includes the bootloader, partition table, OTA data, and the app. **Use the binary that matches your chip** — they are not interchangeable (the C5's second-stage bootloader sits at flash `0x2000`, the C6's at `0x0`; each factory image already carries the correct internal layout and is written from `0x0`).
 
 ```bash
+# ESP32-C6
 esptool.py -p /dev/ttyACM0 --chip esp32c6 write_flash 0x0 binaries/factory.bin
+
+# ESP32-C5
+esptool.py -p /dev/ttyACM0 --chip esp32c5 write_flash 0x0 binaries/factory-c5.bin
 ```
 
 ### 3. Build from Source
