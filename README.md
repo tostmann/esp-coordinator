@@ -1,8 +1,8 @@
 # busware.de ESP32 (ZBOSS) Coordinator
 
-A highly optimized ZBOSS NCP Serial Protocol implementation for ESP32-C6/H2 modules, tailored specifically for **Zigbee2MQTT**. 
+A highly optimized ZBOSS NCP Serial Protocol implementation for ESP32-C6 / ESP32-C5 / H2 modules, tailored specifically for **Zigbee2MQTT**. 
 
-This firmware transforms any cheap, standard ESP32-C6 development board into an enterprise-grade Zigbee Coordinator that rivals or exceeds established commercial adapters.
+This firmware transforms any cheap, standard ESP32-C6 (or ESP32-C5) development board into an enterprise-grade Zigbee Coordinator that rivals or exceeds established commercial adapters.
 
 [Protocol specification](https://wiki.homed.dev/files/9/95/ZBOSS_NCP_Serial_Protocol.pdf)
 
@@ -11,6 +11,8 @@ This firmware transforms any cheap, standard ESP32-C6 development board into an 
 The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Texas Instruments Z-Stack and Silicon Labs EZSP) by offering massive hardware capabilities at a fraction of the cost. 
 
 **Virtually ANY ESP32-C6 board on the market (including generic $3 boards from China) works out-of-the-box as a high-end Coordinator.** You do not need specialized "coordinator" dongles anymore.
+
+> **Also supported: ESP32-C5 (since v1.4.0).** The exact same firmware builds for the ESP32-C5, and the web flasher auto-detects which chip is connected. The **ESP32-C6 remains the reference platform** — the C5's dual-band Wi-Fi brings no benefit to a USB coordinator (its 802.15.4 radio is 2.4 GHz only), and the Wi-Fi-coexistence build below is **C6-only**. Choose the C5 simply if that is the board you have.
 
 ### 🚀 Key Advantages Over the Competition
 
@@ -80,9 +82,9 @@ A full whole-codebase review fixed two memory-safety criticals and a batch of ro
 * **Modern ZBOSS SDK:** Fully ported to ZBOSS SDK v1.6.x.
 
 
-## 🧪 Experimental: native Wi-Fi (coexistence, Mode B)
+## 🧪 Experimental: native Wi-Fi (coexistence, Mode B — ESP32-C6 only)
 
-A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostmann/esp-coordinator/tree/wifi-coex)) lets the coordinator **join your Wi-Fi itself** and expose the ZBOSS NCP over an on-device **TCP server** — no USB host, no ser2net/socat bridge. Zigbee2MQTT then connects with `port: tcp://<device-ip>:6638` and `adapter: zboss`.
+A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostmann/esp-coordinator/tree/wifi-coex), **ESP32-C6 only**) lets the coordinator **join your Wi-Fi itself** and expose the ZBOSS NCP over an on-device **TCP server** — no USB host, no ser2net/socat bridge. Zigbee2MQTT then connects with `port: tcp://<device-ip>:6638` and `adapter: zboss`.
 
 👉 **[Experimental WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**
 
@@ -92,6 +94,8 @@ A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostm
 * **Required host image:** `ghcr.io/tostmann/zigbee2mqtt-esp32:latest` — it carries the longer timeouts the single-radio TCP link needs.
 
 > ⚠️ **Why "experimental":** the ESP32-C6 has a single 2.4 GHz radio time-shared between Wi-Fi and 802.15.4 Zigbee (software coexistence). Espressif rates the "Wi-Fi-STA + always-on coordinator" case as supported-but-unstable, so coexistence quality depends on your RF environment. Use a spare stick / test network, **not** a production setup — and please report how it went on [**Discussion #1**](https://github.com/tostmann/esp-coordinator/discussions/1). Backup/restore over TCP is degraded (use the stable USB build for a full backup).
+>
+> The **ESP32-C5's dual-band Wi-Fi does not help here**: it has a single 1T1R transceiver that can only use one band at a time (time-division multiplexing), so even a 5 GHz Wi-Fi link still time-shares the one radio with the 2.4 GHz Zigbee receiver — the same coexistence class as the C6. For a true *simultaneous* Wi-Fi + Zigbee gateway, Espressif recommends a dual-SoC setup (e.g. ESP32-S3 + ESP32-H2 with separate antennas). That is why this coexistence build stays C6-only.
 
 The stable USB / UART firmware described in this README (and the main flasher) is unchanged.
 

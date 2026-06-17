@@ -298,7 +298,7 @@
             <h1>ESP-Coordinator (ZBOSS NCP)</h1>
             <div style="font-size: 14px; color: #64748b;">
                 <strong>Version:</strong> <span id="firmware-version">lädt…</span><br>
-                <strong>Hardware:</strong> ESP32-C6<br>
+                <strong>Hardware:</strong> ESP32-C6 / ESP32-C5<br>
                 <strong>Zweck:</strong> Zigbee Coordinator Firmware für Z2M<br>
                 <strong>Quellcode:</strong> <a href="https://github.com/tostmann/esp-coordinator" target="_blank" style="color: var(--primary); text-decoration: none;">GitHub Repository</a>
             </div>
@@ -307,13 +307,13 @@
 
     <div class="info-box">
         <strong>Information:</strong>
-        Dieses Tool flasht die aktuelle Factory-Firmware (Version siehe oben) direkt über den Browser auf deinen ESP32-C6.
-        Der Prozess überprüft automatisch, dass es sich bei dem angeschlossenen Gerät um einen <b>ESP32-C6</b> handelt.
+        Dieses Tool flasht die aktuelle Factory-Firmware (Version siehe oben) direkt über den Browser auf deinen ESP32-C6 oder ESP32-C5.
+        Der Flasher erkennt den Chip automatisch und liefert das passende Image; er prüft, dass es sich um einen unterstützten Chip (<b>ESP32-C6</b> oder <b>ESP32-C5</b>) handelt.
     </div>
 
     <div class="info-box" style="background:#fffbeb; border-left-color:#d97706;">
         🧪 <strong>Experimentell — Koordinator über WLAN statt USB:</strong>
-        probiere den <a href="coex/" style="color:#b45309; font-weight:bold;">nativen WiFi-Coex-Build</a> — der ESP32-C6 geht selbst ins WLAN und stellt den NCP über TCP bereit (kein USB-Host, keine ser2net/socat-Bridge). Testground-Build; Rückmeldungen gerne in <a href="https://github.com/tostmann/esp-coordinator/discussions/1" target="_blank" style="color:#b45309;">Discussion #1</a>.
+        probiere den <a href="coex/" style="color:#b45309; font-weight:bold;">nativen WiFi-Coex-Build</a> (<b>nur ESP32-C6</b>) — der ESP32-C6 geht selbst ins WLAN und stellt den NCP über TCP bereit (kein USB-Host, keine ser2net/socat-Bridge). Testground-Build; Rückmeldungen gerne in <a href="https://github.com/tostmann/esp-coordinator/discussions/1" target="_blank" style="color:#b45309;">Discussion #1</a>. <span style="color:#92400e;">(Das Dual-Band-WLAN des C5 hilft der Koexistenz nicht — ein einziges 1T1R-Radio, zeitlich gemultiplext; der C5 wird vom USB/UART-Build oben unterstützt.)</span>
     </div>
 
     <details class="release-notes" id="release-notes">
@@ -326,7 +326,7 @@
         <h3 style="margin-top:0;">1. Verbinde dein Gerät via USB</h3>
         <p style="font-size: 14px; color: #475569;">Klicke auf den Button unten, wähle deinen seriellen Port (z.B. USB JTAG/serial debug unit) und starte den Flash-Vorgang.</p>
         
-        <!-- The manifest.json enforces chipFamily = "ESP32-C6" -->
+        <!-- manifest.json offers two builds: chipFamily "ESP32-C6" + "ESP32-C5"; esp-web-tools picks by detected chip -->
         <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
         <div style="margin-top: 10px; font-size: 12px; color: #94a3b8;">
             Unterstützte Browser: Chrome, Edge, Opera. (Safari/Firefox unterstützen WebSerial noch nicht vollständig).
@@ -417,7 +417,7 @@ advanced:
 <div id="reboot-modal">
     <div class="reboot-modal-card">
         <h3 id="reboot-modal-title">Chip startet neu…</h3>
-        <p id="reboot-modal-msg">Warte bis der ESP32-C6 über USB neu erkannt wurde.</p>
+        <p id="reboot-modal-msg">Warte bis das Gerät über USB neu erkannt wurde.</p>
         <div class="reboot-spinner" id="reboot-modal-spinner"></div>
         <div id="reboot-modal-countdown">…</div>
         <div id="reboot-modal-button-wrap" style="display: none; margin-top: 8px;">
