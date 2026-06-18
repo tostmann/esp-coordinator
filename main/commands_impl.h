@@ -596,7 +596,10 @@ struct zb_ncp::cmd_handle<GET_COORDINATOR_VERSION> : immediate_cmd_process<GET_C
 template <>
 struct zb_ncp::cmd_handle<GET_SHORT_ADDRESS> : immediate_cmd_process<GET_SHORT_ADDRESS>,
 		general_status_res<GET_SHORT_ADDRESS,uint16_t> {
-	static void process_status_res(ncp_generic_status_t& status, uint16_t* res) {
+	// res points into the packed FullRes wire buffer, so it must be the
+	// byte-aligned typedef — a plain uint16_t* trips -Werror=address-of-packed-member
+	// under stricter toolchains (e.g. IDF 6.x / newer GCC). Mirrors GET_PAN_ID.
+	static void process_status_res(ncp_generic_status_t& status, unaligned_uint16_t* res) {
 		*res = zb_get_short_address();
     }
 };
