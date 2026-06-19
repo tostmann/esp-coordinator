@@ -5,6 +5,7 @@
 #include "statuses.h"
 #include "utils.h"
 #include "transport.h"
+#include "wifi_coex.h"
 #include "backup_structured.h"
 #include "nwk/esp_zigbee_nwk.h"
 #include "esp_zigbee_secur.h"
@@ -512,6 +513,15 @@ void zb_ncp::continue_zboss(uint8_t arg) {
     // this boot is past the early-init hang class. Clear the failure
     // breadcrumb and cancel the boot deadline.
     boot_guard::mark_zboss_alive();
+
+    // wifi-coex Mode B: enable WiFi/802.15.4 coexistence then bring up the STA
+    // here at ZB_ZDO_SIGNAL_SKIP_STARTUP — the same call site the IDF
+    // esp_zigbee_gateway uses (esp_coex_wifi_i154_enable() before Wi-Fi
+    // connect), HW-confirmed on a C6 in the coex smoke test. Both no-op unless
+    // wifi_coex_init() ran (i.e. Mode B; continue_zboss is never reached in
+    // Mode A because the Zigbee stack isn't started there).
+    wifi_coex_enable_radio_coex();
+    wifi_coex_start_connect();
 
     // Cold-boot race fix (andryblack/esp-coordinator#5 + regression in #19).
     // The synthetic NCP_RESET response (cmd=0x0002, type=RESPONSE, tsn=0xFF,

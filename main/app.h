@@ -10,6 +10,8 @@ public:
 	   EVENT_INPUT,                /*!< Input event from NCP to host */
 	   EVENT_OUTPUT,               /*!< Output event from host to NCP */
 	   EVENT_RESET,                /*!< Reset event from host to NCP */
+	   EVENT_TCP_DISCONNECT,       /*!< wifi-coex Mode B: TCP client gone — release
+	                                    session-scoped resources on the app task */
 	};
 	struct ctx_t {
 		event_t event;	/*!< The event between the host and NCP */

@@ -31,3 +31,11 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_BOOTLOADER_CONSOLE_UART_DEFAULT=y
+# wifi-coex variant (branch wifi-coex): WiFi STA + 802.15.4 coexistence on the
+# shared C6 2.4 GHz radio (Mode B). These are IDF auto-defaults on C6 but are
+# pinned here so a clean build keeps them. Console routing above is unchanged —
+# in Mode A the USB-Serial/JTAG carries Improv (not console); in Mode B it is
+# idle and the NCP runs over TCP.
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+CONFIG_LWIP_SO_REUSE=y

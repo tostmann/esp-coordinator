@@ -1,0 +1,35 @@
+{
+  "name": "ImprovWiFiBusware",
+  "version": "0.2.0-wip",
+  "description": "Improv-Serial WiFi provisioning for Busware ESP32 products (TUL, TUL32, CUL32, EUL32). Transport-neutral core (feedByte / WiFiBackend) plus Arduino convenience facade for drop-in replacement of jnthas/Improv-WiFi-Library. Bounded 120 s post-boot provisioning window keeps the serial port free for the application's regular traffic.",
+  "keywords": "improv, wifi, esp32, busware, provisioning, esp-idf, arduino",
+  "authors": [
+    {
+      "name": "Dirk Tostmann",
+      "email": "tostmann@gmail.com",
+      "maintainer": true
+    },
+    {
+      "name": "Jonathas Amaral Barbosa",
+      "url": "https://github.com/jnthas"
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tostmann/improv-wifi-busware.git"
+  },
+  "frameworks": "arduino",
+  "platforms": "espressif32, espressif8266",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include",
+    "srcFilter": [
+      "-<*>",
+      "+<improv_wifi.cpp>",
+      "+<serial_filter.cpp>",
+      "+<backend_arduino.cpp>",
+      "+<arduino_facade.cpp>"
+    ]
+  }
+}

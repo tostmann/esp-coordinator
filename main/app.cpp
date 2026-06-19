@@ -3,6 +3,11 @@
 #include "transport.h"
 #include "protocol.h"
 #include "zb_ncp.h"
+#include "netcfg.h"
+#include "wifi_coex.h"
+#include "improv_provisioning.h"
+#include "web_info.h"
+#include "sdkconfig.h"
 #include <nvs_flash.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -33,10 +38,12 @@ esp_err_t app::send_event_int(const ctx_t& ctx) {
         // ZBOSS task via send_cmd_data -> protocol::send_data ->
         // transport::send, and ZBOSS invokes that from INSIDE its
         // zb_osif_disable_all_interrupts/enable critical window (MAC logic
-        // iteration). A blocking xQueueSend here lets the scheduler switch
+        // iteration). A blocking xQueueSend there lets the scheduler switch
         // away inside the critical section and corrupts the per-CPU critical
-        // nesting count -> vPortExitCritical assert panic on ncp_zb_task
-        // (reproduced on the wifi-coex branch 2026-06-06). Callers that CAN
+        // nesting count -> "assert failed: vPortExitCritical port.c:618
+        // (port_uxCriticalNesting[0] > 0)" panic on ncp_zb_task — reproduced
+        // 3x on 2026-06-06 under interview/INDICATION bursts (full queue =
+        // the only time the blocking branch engages). Callers that CAN
         // safely wait (the transport RX tasks) implement their own bounded
         // retry around this call instead (transport::rx_pump).
         ret = xQueueSend(m_queue, &ctx, 0);
@@ -45,7 +52,7 @@ esp_err_t app::send_event_int(const ctx_t& ctx) {
                      ctx.event, (unsigned)ctx.size);
         }
     }
-	
+
     return (ret == pdTRUE) ? ESP_OK : ESP_FAIL ;
 }
 
@@ -102,6 +109,12 @@ esp_err_t app::process_event(const ctx_t& ctx) {
             vTaskDelay(pdMS_TO_TICKS(100));
             esp_restart();
         } break;
+        case EVENT_TCP_DISCONNECT:
+            // Session-scoped resource cleanup, executed on the app task (the
+            // owner of all command state). Currently: drop the
+            // GET_NETWORK_BACKUP RAM snapshot a vanished client left behind.
+            zb_ncp::release_backup_snapshot();
+            break;
         default:
             break;
     }
@@ -127,41 +140,110 @@ esp_err_t app::init_int() {
 
 esp_err_t app::start_int() {
 	ESP_LOGV(TAG,"start_int");
-	auto res = transport::start();
-	if (res != ESP_OK)
-		return res;
-
-    // Boot-time framing-level ACK. Sent immediately at start-up so z2m's
-    // open-port handshake doesn't time out waiting for ANY frame from us.
-    // Carries no NVRAM-state-dependent fields — flags byte is_ack=1 with
-    // packet_seq=0 and ack_seq=0 (the "wake up call" pattern from
-    // andryblack/esp-coordinator#11).
-    uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
-    transport::send(raw_data, sizeof(raw_data));
-
-    if (boot_guard::safe_mode()) {
-        // WEDGE-1 safe mode: repeated early-boot failures — bring up the
-        // host link WITHOUT the ZBOSS stack so the stick stays reachable and
-        // recoverable (dispatch restricted in zb_ncp::on_rx_data). Send the
-        // boot-ready frame here since continue_zboss will never run; hosts
-        // then fail visibly on GENERIC_BLOCKED getters instead of a silent
-        // open-port timeout. NO early return — the event pump at the end of
-        // this function is what drains m_queue (incl. these very frames and
-        // every command response); returning here would leave the link mute.
-        ESP_LOGE(TAG, "boot guard SAFE MODE: ZBOSS not started");
-        zb_ncp::send_boot_ready_frame();
+    // wifi-coex variant: a hard boot-time MODE GATE on "are STA creds present?".
+    // Improv-Serial provisioning and the binary NCP DEAD-frame stream never
+    // share the USB-Serial/JTAG wire simultaneously, so no per-byte demux is
+    // needed and a coincidental 'IMPROV' substring inside an NCP payload can
+    // never be mis-parsed as a provisioning frame.
+    if (!netcfg_has_sta_creds()) {
+        // MODE A — provisioning. The USB-Serial/JTAG driver is already installed
+        // (transport::init in init_int); we do NOT start the transport poll task,
+        // do NOT send the boot ACK, and do NOT start the Zigbee stack — so no
+        // unsolicited DEAD frame ever hits the line. Improv runs on its own task
+        // reading/writing the USB-JTAG endpoint directly; on success it persists
+        // creds and reboots into Mode B.
+        ESP_LOGI(TAG, "Mode A: no STA creds -> Improv-Serial provisioning");
+        // Mode A never starts ZBOSS, so continue_zboss()/mark_zboss_alive() are
+        // never reached and the boot guard's 30 s assume-fail deadline would
+        // otherwise reboot the provisioning session (and, after 3 reboots, latch
+        // the stick into safe mode). Stand the guard down: provisioning is a
+        // legitimate, unbounded non-ZBOSS state.
+        boot_guard::cancel();
+        improv_provisioning_start();
     } else {
-        // Cold-boot panID race: start the ZBOSS dispatch task here, after the
-        // transport polling task is up and the event loop is about to drain
-        // m_queue. Triggers zboss_main_loop -> SKIP_STARTUP -> continue_zboss,
-        // which sends the synthetic NCP_RESET response and kicks off
-        // NETWORK_STEERING so the persisted NVRAM-stored network is actually
-        // active by the time z2m's first GET_JOINED query arrives. Without this
-        // the task only spins up lazily when the host issues NWK_FORMATION /
-        // NWK_START_WITHOUT_FORMATION — but z2m doesn't issue those at startup
-        // (it queries first), and on stale defaults it formNetwork()s and wipes
-        // every paired device.  See andryblack/esp-coordinator#5/#19, z2m #26152.
-        zb_ncp::start_zigbee_stack();
+        // MODE B — operational. Bring up WiFi STA (WIFI_PS_NONE first, C6 rule),
+        // switch the host link to the TCP NCP server, then start the Zigbee
+        // stack. The boot framing ACK is (re)emitted on each TCP accept by the
+        // transport (a TCP client connects later than boot, unlike the always-
+        // open USB port). The NCP_RESET boot-ready frame + esp_coex_wifi_i154_enable()
+        // + esp_wifi_connect() all run from zb_ncp::continue_zboss
+        // (ZB_ZDO_SIGNAL_SKIP_STARTUP), mirroring the esp_zigbee_gateway flow
+        // that was HW-confirmed on a C6.
+        ESP_LOGI(TAG, "Mode B: STA creds present -> WiFi coex + NCP-over-TCP :%d", CONFIG_NCP_TCP_PORT);
+        const bool safe = boot_guard::safe_mode();
+        auto werr = wifi_coex_init();
+        if (werr != ESP_OK)
+            return werr;
+        transport::use_tcp(CONFIG_NCP_TCP_PORT);
+        if (!safe) {
+            // Normal Mode B: dedicate USB-Serial/JTAG to the 120 s Improv
+            // reconfig window (started below) so a user can re-enter WiFi creds
+            // even while WiFi is up. The NCP host links here are TCP (primary) +
+            // UART1; USB is NOT an NCP interface, so Improv and the NCP framer
+            // never contend for the endpoint. Safe mode keeps USB serving the
+            // NCP recovery whitelist instead (see below) and skips the window.
+            transport::disable_usb_ncp();
+        }
+        auto res = transport::start();
+        if (res != ESP_OK)
+            return res;
+
+        // Boot framing ACK for the SERIAL interfaces (USB/UART NCP hosts stay
+        // available in Mode B next to TCP — master parity, andryblack#11): at
+        // this point m_active is IFACE_NONE, so the frame is offered to every
+        // serial interface non-blockingly. TCP clients don't need it here —
+        // they connect later and get it re-emitted on each accept
+        // (transport::tcp_task_int).
+        uint8_t raw_data[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
+        transport::send(raw_data, sizeof(raw_data));
+
+        if (safe) {
+            // WEDGE-1 safe mode: repeated early-boot failures — keep the host
+            // link up WITHOUT the ZBOSS stack (dispatch restricted in
+            // zb_ncp::on_rx_data) so the stick stays reachable and recoverable
+            // over TCP, not just USB/UART. continue_zboss() never runs in safe
+            // mode, so the WiFi STA it normally brings up
+            // (wifi_coex_start_connect at SKIP_STARTUP) would never associate —
+            // the TCP server task would block forever on wifi_coex_is_up() and
+            // never bind. Start the STA here so the recovery host can reach us
+            // over TCP to send NCP_RESET (options=2 = remote factory-erase of
+            // the NVRAM a wedged stick chokes on). No radio-coex enable: there
+            // is no 802.15.4 stack to coexist with this boot.
+            // Also send the boot-ready frame here (continue_zboss won't); hosts
+            // then fail visibly on GENERIC_BLOCKED getters instead of a silent
+            // open-port timeout. NO early return — the event pump at the end of
+            // this function is what drains m_queue (incl. these very frames and
+            // every command response); returning here would leave the link mute.
+            ESP_LOGE(TAG, "boot guard SAFE MODE: ZBOSS not started");
+            wifi_coex_start_connect();
+            zb_ncp::send_boot_ready_frame();
+        } else {
+            // Cold-boot panID race: start the ZBOSS dispatch task here, after
+            // the transport polling task is up and the event loop is about to
+            // drain m_queue. Triggers zboss_main_loop -> SKIP_STARTUP ->
+            // continue_zboss, which resumes the persisted NVRAM network
+            // (ZB_BDB_INITIALIZATION -> DEVICE_REBOOT, per BOOT-1) so it is
+            // active by the time z2m's first GET_JOINED query arrives. Without
+            // this the task only spins up lazily when the host issues
+            // NWK_FORMATION / NWK_START_WITHOUT_FORMATION — but z2m doesn't
+            // issue those at startup (it queries first), and on stale defaults
+            // it formNetwork()s and wipes every paired device.
+            // See andryblack/esp-coordinator#5/#19, z2m #26152.
+            zb_ncp::start_zigbee_stack();
+
+            // 120 s post-boot Improv-Serial reconfig window on USB-Serial/JTAG
+            // (Dirk: reconfigure WiFi even when WiFi is up). USB-JTAG was
+            // reserved for Improv above (disable_usb_ncp). CaptureBackend
+            // persists the new creds + reboots; wifi_coex applies them next
+            // boot. The task frees itself once the window closes.
+            improv_provisioning_start_reconfig();
+
+            // On-device info page: after WiFi is up, http://<ip>/ (the Improv
+            // "Visit Device" URL) serves the Z2M-over-TCP setup instructions
+            // with this device's own address filled in. Waits for got-IP
+            // internally; normal Mode B only (not safe mode).
+            web_info_start();
+        }
     }
 
     // The synthetic NCP_RESET *response* (cmd=0x0002, tsn=0xFF, status=OK)

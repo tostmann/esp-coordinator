@@ -73,6 +73,13 @@ public:
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);
 
+	// Free the GET_NETWORK_BACKUP RAM snapshot (40 KB) if one is resident —
+	// called via app's EVENT_TCP_DISCONNECT so an aborted pull from a
+	// vanished TCP client doesn't pin the allocation on the tight Mode-B
+	// heap. Runs on the app task (the snapshot's owning task); defined in
+	// commands_impl.h next to the snapshot state.
+	static void release_backup_snapshot();
+
 	// Intercept hook for malformed ZDP Simple_Desc_rsp frames. The ZBOSS
 	// stack parser (libzboss_stack.zczr.a) does a strict
 	//     frame_length == declared_simple_desc_length

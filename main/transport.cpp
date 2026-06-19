@@ -1,5 +1,6 @@
 #include "transport.h"
 #include "app.h"
+#include "protocol.h"
 #include "utils.h"
 
 #include <esp_log.h>
@@ -12,7 +13,16 @@
 #endif
 #include <cstring>
 
+#include "wifi_coex.h"
+#include <lwip/sockets.h>
+
 static const char* TAG = "TRNPT";
+
+// R4 overall per-frame deadline for the active-TCP send loop. SO_SNDTIMEO
+// (8 s, set on accept) bounds each ::send, but lwIP restarts that clock per
+// call and returns partial counts — a trickling peer could otherwise park
+// the app task (and hold m_tcp_fd_sem) far beyond the intended bound.
+static constexpr uint32_t TCP_FRAME_DEADLINE_MS = 12000;
 
 #if CONFIG_NCP_UART_TRANSPORT
 // UART1 fixed: UART0 is the (silent) primary console and carries the ROM
@@ -36,7 +46,7 @@ transport& transport::instance() {
 
 esp_err_t transport::write_int(const void *buffer, size_t size)
 {
-    // Dual-interface TX routing (see iface_t in transport.h). Frames go only
+    // Tri-interface TX routing (see iface_t in transport.h). Frames go only
     // to the interface the host last spoke on; in IFACE_NONE (boot frames,
     // before any host byte) they are offered to every interface with
     // strictly non-blocking writes.
@@ -53,7 +63,67 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
     const uint8_t active = m_active.load(std::memory_order_relaxed);
     bool delivered = false;
 
-    if (active != IFACE_UART) {
+    // TCP client (wifi-coex Mode B). Only the ACTIVE-TCP path writes the
+    // socket — IFACE_NONE deliberately does NOT offer frames to a connected
+    // client: a fresh client gets its boot frames directly from tcp_task at
+    // accept, and anything else sent pre-qualification would carry stale
+    // sequence state (the route only flips, and the link state only resets,
+    // once the client's first DE-AD frame arrives in rx_qualified_pump).
+    //
+    // R4 semantics on the active path: SO_SNDTIMEO (set on accept) bounds
+    // each ::send and an overall per-frame deadline bounds the whole loop
+    // (a trickling peer restarts the SNDTIMEO clock with every partial
+    // accept), so the single app task can NOT park indefinitely on a
+    // coex-starved WiFi link — it must stay free to drain m_input_buf,
+    // serve the next host command AND deliver Zigbee INDICATION frames
+    // (the data path the owner prioritises). On a stall: if nothing of this
+    // frame reached the wire (off==0, the common "TCP send buffer full under
+    // starvation" case) just drop the frame — the host re-requests and the
+    // stream stays frame-aligned. If a partial frame already went out the
+    // host's DEAD stream is desynced, so force a clean resync by tearing the
+    // connection (tcp_task's recv breaks -> close -> re-accept; the host
+    // re-syncs on the per-accept boot frames).
+    //
+    // The whole section holds m_tcp_fd_sem so tcp_task cannot close (and a
+    // re-accept cannot reuse) the fd mid-send — the teardown waits here at
+    // most the per-frame deadline.
+    if (m_use_tcp && active == IFACE_TCP) {
+        utils::sem_lock l(m_tcp_fd_sem);
+        int fd = m_tcp_sock;
+        if (fd >= 0) {
+            const uint8_t *p = static_cast<const uint8_t *>(buffer);
+            const TickType_t deadline =
+                xTaskGetTickCount() + pdMS_TO_TICKS(TCP_FRAME_DEADLINE_MS);
+            size_t off = 0;
+            bool fail = false;
+            while (off < size) {
+                int n = ::send(fd, p + off, size - off, 0);
+                if (n <= 0) {
+                    fail = true;     // SNDTIMEO expired with zero progress
+                    break;
+                }
+                off += static_cast<size_t>(n);
+                if (off < size && xTaskGetTickCount() >= deadline) {
+                    fail = true;     // trickling peer: partials keep restarting
+                    break;           // the SNDTIMEO clock, the deadline doesn't
+                }
+            }
+            if (fail) {
+                if (off > 0) {
+                    ::shutdown(fd, SHUT_RDWR);
+                }
+                ESP_LOGE(TAG, "tcp send stalled at %u/%u bytes -- %s",
+                         (unsigned)off, (unsigned)size,
+                         off ? "tearing connection" : "frame dropped");
+            } else {
+                delivered = true;
+            }
+        }
+        // fd < 0: client vanished mid-session — the frame is dropped; the
+        // host re-requests after reconnecting.
+    }
+
+    if (m_serve_usb_ncp && (active == IFACE_USB || active == IFACE_NONE)) {
         const TickType_t ticks = (active == IFACE_USB) ? pdMS_TO_TICKS(RINGBUF_TIMEOUT_MS) : 0;
         if (usb_serial_jtag_write_bytes(buffer, size, ticks) == (int)size) {
             delivered = true;
@@ -63,7 +133,7 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
     }
 
 #if CONFIG_NCP_UART_TRANSPORT
-    if (m_uart_ok && active != IFACE_USB) {
+    if (m_uart_ok && (active == IFACE_UART || active == IFACE_NONE)) {
         // uart_write_bytes has NO timeout parameter — it enqueues with
         // portMAX_DELAY / busy-spins when the TX ring is full. Gate it on the
         // ring having room for the whole frame (+ item-header margin) so the
@@ -124,9 +194,9 @@ void transport::rx_pump(const uint8_t* data, int readed) {
         // Bounded retry on a momentarily-full event queue: the bytes are
         // already committed to m_output_buf, so a dropped event would orphan
         // them and shift the byte/event pairing. Retrying HERE is safe —
-        // rx_pump only ever runs on our own RX tasks (USB/UART), never on
-        // the ZBOSS task (app::send_event itself must stay non-blocking for
-        // that caller — see the critical-section panic note there).
+        // rx_pump only ever runs on our own RX tasks (USB/UART/TCP), never
+        // on the ZBOSS task (app::send_event itself must stay non-blocking
+        // for that caller — see the critical-section panic note there).
         int tries = RINGBUF_TIMEOUT_MS / 10;
         while (app::send_event(ncp_event) != ESP_OK && tries-- > 0) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -168,6 +238,17 @@ void transport::rx_qualified_pump(iface_t iface, bool& pending_de, const uint8_t
         }
     }
 
+    if (iface == IFACE_TCP) {
+        // A fresh TCP client qualifies (first DE-AD frame seen): re-baseline
+        // the protocol layer to cold-boot state so the new host — whose own
+        // sequence restarts at 0 — sees our first dynamic frame at seq 1,
+        // exactly like a fresh boot (the herdsman reconnect fix, B). Doing
+        // this at QUALIFICATION instead of at accept() means an unqualified
+        // connect (port scanner, network monitor) can no longer re-baseline
+        // an active serial session's link state — the DE-AD gate's guarantee
+        // holds for the link state too, not just the route.
+        protocol::reset_link_state();
+    }
     m_active.store(iface, std::memory_order_relaxed);
     pending_de = false;
     if (spans) {
@@ -302,6 +383,12 @@ esp_err_t transport::init_int() {
         return ESP_ERR_NO_MEM;
     }
 
+    m_tcp_fd_sem = xSemaphoreCreateMutex();
+    if (!m_tcp_fd_sem) {
+        ESP_LOGE(TAG, "TCP fd semaphore create error");
+        return ESP_ERR_NO_MEM;
+    }
+
     usb_serial_jtag_driver_config_t usb_serial_jtag_config;
     usb_serial_jtag_config.rx_buffer_size = BUF_SIZE * 2;
     usb_serial_jtag_config.tx_buffer_size = BUF_SIZE * 2;
@@ -373,15 +460,206 @@ esp_err_t transport::start_int() {
 		ESP_LOGE(TAG,"need init");
 		return ESP_FAIL;
 	}
-	ESP_LOGI(TAG,"start");
-	if (xTaskCreate(&task, "transport", TASK_STACK, this, TASK_PRIORITY, NULL) != pdTRUE) {
-		return ESP_FAIL;
+	ESP_LOGI(TAG,"start%s", m_use_tcp ? " (+tcp)" : "");
+	// Task-create failures DEGRADE instead of failing the whole transport:
+	// returning ESP_FAIL here lands in ESP_ERROR_CHECK(app::start()) ->
+	// abort() -> deterministic boot loop with no recovery path. Boot-time
+	// heap demand grew with the tri-interface merge on the documented-tight
+	// Mode-B heap, so each interface is brought up best-effort and the boot
+	// only fails if NO host interface could be started at all (mirrors the
+	// uart_init_int "primary link must survive" degrade).
+	int started = 0;
+	if (m_serve_usb_ncp) {
+		if (xTaskCreate(&task, "transport", TASK_STACK, this, TASK_PRIORITY, NULL) == pdTRUE) {
+			++started;
+		} else {
+			ESP_LOGE(TAG, "USB RX task create failed -- USB interface unavailable");
+		}
+	} else {
+		// wifi-coex normal Mode B: USB-Serial/JTAG is reserved for the Improv
+		// reconfig window (app::start_int). Not starting the USB RX task gives
+		// Improv exclusive ownership of the endpoint. NCP hosts use TCP + UART.
+		ESP_LOGI(TAG, "USB NCP interface off (reserved for Improv reconfig)");
 	}
 #if CONFIG_NCP_UART_TRANSPORT
-	if (m_uart_ok &&
-	    xTaskCreate(&uart_task, "transport_uart", TASK_STACK, this, TASK_PRIORITY, NULL) != pdTRUE) {
-		return ESP_FAIL;
+	if (m_uart_ok) {
+		if (xTaskCreate(&uart_task, "transport_uart", TASK_STACK, this, TASK_PRIORITY, NULL) == pdTRUE) {
+			++started;
+		} else {
+			m_uart_ok = false;
+			ESP_LOGE(TAG, "UART RX task create failed -- continuing without UART");
+		}
 	}
 #endif
+	if (m_use_tcp) {
+		if (xTaskCreate(&tcp_task, "ncp_tcp", TCP_TASK_STACK, this, TASK_PRIORITY, NULL) == pdTRUE) {
+			++started;
+		} else {
+			m_use_tcp = false;
+			ESP_LOGE(TAG, "TCP task create failed -- continuing on serial interfaces only");
+		}
+	}
+	if (started == 0) {
+		ESP_LOGE(TAG, "no host interface could be started");
+		return ESP_FAIL;
+	}
 	return ESP_OK;
+}
+
+// wifi-coex Mode B host link: a single-client raw TCP server carrying the same
+// DEAD-framed NCP stream the serial backends carry. Host-bound writes go
+// through write_int (IFACE_TCP routing); host->NCP bytes are fed through the
+// IDENTICAL rx_qualified_pump path the USB/UART tasks use, so the client is
+// signature-gated and protocol/app reassemble frames the same way. Runs as a
+// third RX task next to task()/uart_task() (own m_tcp_temp_buf; rx_pump
+// serialises m_output_buf under m_output_sem).
+void transport::tcp_task_int() {
+	// bind() can only succeed once the STA has an IP.
+	while (!wifi_coex_is_up()) {
+		vTaskDelay(pdMS_TO_TICKS(200));
+	}
+
+	m_listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (m_listen_sock < 0) {
+		ESP_LOGE(TAG, "socket() failed");
+		vTaskDelete(NULL);
+		return;
+	}
+	int opt = 1;
+	setsockopt(m_listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+	struct sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	addr.sin_port = htons(m_tcp_port);
+	if (::bind(m_listen_sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0 ||
+	    ::listen(m_listen_sock, 1) != 0) {
+		ESP_LOGE(TAG, "bind/listen :%u failed (errno %d)", m_tcp_port, errno);
+		::close(m_listen_sock);
+		m_listen_sock = -1;
+		vTaskDelete(NULL);
+		return;
+	}
+	ESP_LOGI(TAG, "NCP-over-TCP listening on :%u", m_tcp_port);
+
+	// Boot framing ACK — the open-port handshake z2m expects within ~1 s of
+	// opening the port (andryblack/esp-coordinator#11). Over USB the port is
+	// always open so app::start_int sends it once; over TCP a client connects
+	// later (and may reconnect), so it is (re)emitted on every fresh accept.
+	static const uint8_t boot_ack[] = {0xDE, 0xAD, 0x05, 0x00, 0x06, 0x01, 0x8F};
+
+	while (true) {
+		struct sockaddr_in cli = {};
+		socklen_t clilen = sizeof(cli);
+		int cs = ::accept(m_listen_sock, reinterpret_cast<struct sockaddr*>(&cli), &clilen);
+		if (cs < 0) {
+			vTaskDelay(pdMS_TO_TICKS(100));
+			continue;
+		}
+		int one = 1;
+		setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+		setsockopt(cs, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+		// Detect a vanished host fast. lwIP defaults TCP_KEEPIDLE to 7200 s, so a
+		// z2m that dies without FIN/RST (crash, OOM-kill, cable pull) would otherwise
+		// pin this single-client server in a blocking recv() for up to 2 h, locking
+		// out every new connection (the empirically-found ghost-connection gap).
+		// Probe after 15 s idle (matching herdsman uart.js setKeepAlive(true,15000)),
+		// then every 3 s, drop after 3 misses (~24 s) so recv() returns and the
+		// accept loop frees the slot.
+		int keep_idle = 15, keep_intvl = 3, keep_cnt = 3;
+		setsockopt(cs, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
+		setsockopt(cs, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof(keep_intvl));
+		setsockopt(cs, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof(keep_cnt));
+		// R4: bound host-bound sends. Under coex the single radio is time-shared
+		// with the always-RX Zigbee coordinator, so a WiFi TX window can be starved
+		// for seconds; without this, a blocking ::send in write_int parks the app
+		// task (the sole drainer of m_input_buf and server of every host command +
+		// Zigbee INDICATION) until the stall clears — observed as the host seeing
+		// the link go silent for 30 s+ and aborting. Cap the send so the task
+		// recovers and stays responsive; write_int drops/​resyncs on expiry.
+		struct timeval snd_to = {};
+		snd_to.tv_sec = 8;
+		setsockopt(cs, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to));
+
+		// Per-accept boot frames go DIRECTLY to this socket — write_int routes
+		// by m_active, which at this moment may still point elsewhere (the
+		// route only flips, and the link state only resets, once the client's
+		// first DE-AD frame arrives in rx_qualified_pump). SO_SNDTIMEO is
+		// already set, so these sends are bounded. The socket is published
+		// AFTER them, so no app-task write can interleave with the boot
+		// sequence.
+		::send(cs, boot_ack, sizeof(boot_ack), 0);
+
+		// Also re-emit the NCP_RESET boot-ready frame (cmd=0x0002, tsn=0xFF, OK)
+		// that z2m's open/reset handshake waits for. Over USB zb_ncp::continue_zboss
+		// sends it once at boot; over TCP a client connects later, so re-send per
+		// accept. KEEP IN SYNC with boot_ready_frame in zb_ncp.cpp::continue_zboss.
+		// Timing-safe in Mode B: the TCP task only accepts after IP_EVENT_STA_GOT_IP,
+		// which is after continue_zboss has loaded NVRAM (network-ready semantics hold).
+		static const uint8_t ncp_reset_ready[] = {
+			0xDE, 0xAD, 0x0E, 0x00, 0x06, 0xC0, 0x5D, 0x50, 0xD4,
+			0x00, 0x01, 0x02, 0x00, 0xFF, 0x00, 0x00
+		};
+		::send(cs, ncp_reset_ready, sizeof(ncp_reset_ready), 0);
+
+		m_tcp_pending_de = false;
+		{
+			utils::sem_lock l(m_tcp_fd_sem);
+			m_tcp_sock = cs;
+		}
+		ESP_LOGI(TAG, "NCP client connected");
+
+		while (true) {
+			int r = ::recv(cs, m_tcp_temp_buf, BUF_SIZE, 0);
+			if (r <= 0) break;   // peer closed, error, or close_tcp_client()'s FIN
+			rx_qualified_pump(IFACE_TCP, m_tcp_pending_de, m_tcp_temp_buf, r);
+		}
+
+		// Teardown under m_tcp_fd_sem: write_int may be mid-send on this fd
+		// (bounded by the per-frame deadline) — closing under the lock means
+		// the fd can never be reused by a fresh accept (or the link
+		// watchdog's probe socket) while a stale snapshot of it is still
+		// being written to. NOTE: no m_output_buf drain here (an earlier
+		// revision had one) — the drain raced the app task as a second
+		// stream-buffer reader and orphaned queued EVENT_OUTPUT sizes, eating
+		// the NEXT session's first commands. Leftover old-session bytes are
+		// harmless instead: the protocol layer is a streaming reassembler and
+		// the link-state reset happens at next qualification anyway.
+		{
+			utils::sem_lock l(m_tcp_fd_sem);
+			m_tcp_sock = -1;
+			::close(cs);
+		}
+		ESP_LOGW(TAG, "NCP client disconnected");
+
+		// If the departed client held the TX route, demote to IFACE_NONE (CAS:
+		// don't stomp a concurrent flip to a serial host) so NCP->host frames
+		// stop targeting a dead socket and a reconnecting client re-qualifies
+		// from a clean slate.
+		uint8_t expected = IFACE_TCP;
+		m_active.compare_exchange_strong(expected, IFACE_NONE,
+		                                 std::memory_order_relaxed,
+		                                 std::memory_order_relaxed);
+
+		// Let the app task release session-scoped resources (currently the
+		// GET_NETWORK_BACKUP RAM snapshot — 40 KB that would otherwise stay
+		// resident on the tight Mode-B heap after an aborted pull). Posted as
+		// an event so the release runs on the task that owns the resource.
+		app::ctx_t ev = { .event = app::EVENT_TCP_DISCONNECT, .size = 0 };
+		app::send_event(ev);
+	}
+}
+
+void transport::close_tcp_client() {
+	transport& t = instance();
+	if (!t.m_use_tcp) {
+		return;
+	}
+	utils::sem_lock l(t.m_tcp_fd_sem);
+	if (t.m_tcp_sock >= 0) {
+		// FIN only — the close itself stays with tcp_task (its recv unblocks
+		// on this shutdown and runs the normal teardown). A full ::close from
+		// here would race tcp_task's own ::close(cs) on a reused fd.
+		::shutdown(t.m_tcp_sock, SHUT_RDWR);
+	}
 }

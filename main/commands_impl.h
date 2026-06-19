@@ -1,8 +1,10 @@
 #include "esp_partition.h"
 #include "nvs_flash.h"
 #include "app.h"
+#include "transport.h"
 #include "boot_guard.h"
 #include "version.h"
+#include "esp_heap_caps.h"
 
 #include "commands_helpers.h"
 #include <esp_mac.h>
@@ -154,6 +156,15 @@ static void ncp_reset_deferred_task(void* arg) {
     // "response + host processing" is gone along with the pre-reboot
     // response itself — see cmd_handle<NCP_RESET> below.
     vTaskDelay(pdMS_TO_TICKS(150));
+    // wifi-coex Mode B: FIN the TCP client BEFORE rebooting. esp_restart
+    // drops WiFi without any TCP teardown — the host would sit on a
+    // silently dead connection (no FIN, no RST; until keepalive expiry)
+    // instead of reconnecting for the boot-ready 'response'. The shutdown
+    // makes the close visible immediately; the host's reconnect then lands
+    // on the fresh post-reboot listener. No-op without a connected client
+    // or when TCP transport is off.
+    transport::close_tcp_client();
+    vTaskDelay(pdMS_TO_TICKS(50));   // let the FIN out while WiFi is still up
     ESP_LOGI(TAG,"restart");
     esp_restart();
 }
@@ -1499,6 +1510,8 @@ struct zb_ncp::cmd_handle<ZDO_MGMT_LQI_REQ> : request_cmd_process< ZDO_MGMT_LQI_
     }
 };
 
+#include "zdo/esp_zigbee_zdo_command.h"
+
 // Request that a Remote Device leave the network
 // [CommandId.ZDO_MGMT_LEAVE_REQ]: {
 //     request: [
@@ -1514,20 +1527,50 @@ struct ZDO_MGMT_LEAVE_REQ_args_t {
     uint8_t long_addr[8];
     uint8_t flags;
 }__attribute__((packed));
+// LEAVE-GATE + safe removal (2026-06-19, bench-characterized root cause of the
+// field "spontaneous wipe", Discussion #1). The LOW-LEVEL zdo_mgmt_leave_req()
+// this handler used to call makes the coordinator intermittently (~60-75% per
+// leave, bench-measured) perform an NLME-LEAVE on SELF -> it silently wipes its
+// OWN network (live PIB + persisted NVRAM), live, no reboot. The wipe is target-
+// and param-independent (unknown short, self 0x0000, and a freshly joined child
+// all wipe; DevAddr=0 wipes as much as DevAddr=ieee). z2m sends this leave on
+// every device force-remove -> the field "spontaneous wipe".
+//
+// FIX: route through the OFFICIAL esp-zigbee-lib API esp_zb_zdo_device_leave_req()
+// instead of the raw low-level call. Bench A/B (temp diag cmd, since removed):
+// the low-level call wiped ~2/3 for EVERY target; the esp_zb wrapper wiped 0/12
+// for a remote target and a real joined child survived -> the bug is specific to
+// the raw low-level call. The ONE residual case the wrapper still self-wipes is a
+// leave addressed to dst=0x0000 (the coordinator itself: 6/6), which is
+// semantically "I, the coordinator, leave my own network" -- z2m never sends that
+// for a device removal, so we refuse it. Immediate handler (mirrors
+// NWK_PERMIT_JOINING): reply synchronously, fire the leave async. Runs under the
+// dispatch's zboss_lock_guard, so esp_zb_* is safe here (same recursive osif lock
+// that esp_zb_lock_acquire takes).
 template<>
-struct zb_ncp::cmd_handle<ZDO_MGMT_LEAVE_REQ> : request_cmd_process< ZDO_MGMT_LEAVE_REQ, ZDO_MGMT_LEAVE_REQ_args_t, zb_zdo_mgmt_leave_param_t, zb_zdo_mgmt_leave_res_t > {
-    using Base = request_cmd_process< ZDO_MGMT_LEAVE_REQ, ZDO_MGMT_LEAVE_REQ_args_t, zb_zdo_mgmt_leave_param_t, zb_zdo_mgmt_leave_res_t >;
-    static constexpr size_t additional_buffer_size = 0;
-    static constexpr const char* name = "ZDO_MGMT_LEAVE_REQ";
-    static void format_request(zb_zdo_mgmt_leave_param_t& req, const ZDO_MGMT_LEAVE_REQ_args_t& arg) {
-        memset(&req,0,sizeof(zb_zdo_mgmt_leave_param_t));
-        req.dst_addr = arg.short_addr;
-        memcpy(req.device_address,arg.long_addr,8);
-        req.rejoin = (arg.flags & 0x80) ? 1 : 0;
-    }
-    static uint8_t start_request(uint8_t buf) {
-        //ESP_LOGI(TAG,"S_ZDO_MGMT_LEAVE_REQ start_request device_address: " IEEE_ADDR_FMT " dst_addr:%04x ",IEEE_ADDR_PRINT(s_req.device_address),s_req.dst_addr);
-        return zdo_mgmt_leave_req(buf,&Base::req_cb);
+struct zb_ncp::cmd_handle<ZDO_MGMT_LEAVE_REQ> : immediate_cmd_process<ZDO_MGMT_LEAVE_REQ> {
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t);
+    static size_t process_immediate(const void* inbuf, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        auto resp = reinterpret_cast<generic_response_t*>(outdata);
+        resp->category = STATUS_CATEGORY_ZDO;   // byte-compatible with the old request_cmd_process reply
+        if (inlen < sizeof(ZDO_MGMT_LEAVE_REQ_args_t)) {
+            resp->status = GENERIC_INVALID_PARAMETER;
+            return sizeof(generic_response_t);
+        }
+        ZDO_MGMT_LEAVE_REQ_args_t a;
+        memcpy(&a, inbuf, sizeof(a));   // unaligned-safe copy out of the wire buffer
+        if (a.short_addr == 0x0000) {
+            ESP_LOGW(TAG, "ZDO_MGMT_LEAVE_REQ: refusing self-addressed leave (dst=0x0000 would wipe the coordinator)");
+            resp->status = GENERIC_OPERATION_FAILED;
+            return sizeof(generic_response_t);
+        }
+        esp_zb_zdo_mgmt_leave_req_param_t p; memset(&p, 0, sizeof(p));
+        memcpy(p.device_address, a.long_addr, 8);
+        p.dst_nwk_addr = a.short_addr;
+        p.rejoin = (a.flags & 0x80) ? 1 : 0;
+        esp_zb_zdo_device_leave_req(&p, [](esp_zb_zdp_status_t, void*){}, nullptr);
+        resp->status = GENERIC_OK;   // leave initiated; the target leaves asynchronously
+        return sizeof(generic_response_t);
     }
 };
 
@@ -2026,9 +2069,41 @@ static restore_session_t s_restore_session = { 0, 0, false };
 static uint8_t* s_backup_snapshot = nullptr;
 static uint32_t s_backup_snapshot_size = 0;
 
+// Mode-B heap guard for the snapshot malloc: the 40960-byte single block
+// competes with esp_wifi/lwIP dynamic buffers on a heap with a documented
+// OOM incident (transport.h RINGBUF_SIZE note). Only take the snapshot when
+// the largest free block leaves a comfortable margin afterwards; otherwise
+// fall back to the per-chunk direct reads (correct, just not point-in-time).
+static constexpr size_t BACKUP_SNAPSHOT_HEAP_MARGIN = 24 * 1024;
+
+// Free a resident snapshot. Public via zb_ncp::release_backup_snapshot():
+// app's EVENT_TCP_DISCONNECT calls it so an aborted pull from a vanished
+// TCP client doesn't pin 40 KB until the next backup session. Runs on the
+// app task only (same task that builds/serves the snapshot — no locking).
+void zb_ncp::release_backup_snapshot() {
+    if (s_backup_snapshot) {
+        ESP_LOGI(TAG, "GET_NETWORK_BACKUP: snapshot released (session abandoned)");
+        free(s_backup_snapshot);
+        s_backup_snapshot = nullptr;
+        s_backup_snapshot_size = 0;
+    }
+}
+
 template <>
 struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP> {
-    static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 128;
+    // Chunk size 1024 (was 128): the full 0xA000 image is then 40 round-trips
+    // instead of 320. Over the wifi-coex variant (NCP on TCP, single radio shared
+    // with the always-RX Zigbee coordinator) each round-trip is exposed to a spiky
+    // multi-second latency tail, so cutting their count ~8x is what makes a host
+    // backup actually complete. Frame budget: 7(hdr)+2(crc)+5(cmd_t)+2(generic_res)
+    // +8(total+len)+1024 = 1048 B < MAX_FRAME_SIZE 2048; the wrapper's stack outdata
+    // is resp_buffer_size+sizeof(cmd_t) ~= 1039 B on the 8 KB app task. All consumers
+    // (herdsman backup loop, html/zboss_backup.js) advance by the reported
+    // chunk_length, so they follow this transparently. NOTE: this is the GET
+    // (device->host) direction only — RESTORE_NETWORK chunks stay small because the
+    // host->device RX_BUFFER_SIZE is 1024 (protocol.h) and can't hold a 1 KB-payload
+    // inbound frame.
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 1024;
     static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
         // Unaligned-safe read of offset (RV32 fault risk if cast as uint32_t*).
         uint32_t offset = 0;
@@ -2061,11 +2136,45 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         // restarted pull gets fresh data. Allocation/read failure degrades to
         // the original per-chunk direct reads below.
         if (offset == 0) {
+            // === BACKUP-1 poison-backup guard (root-caused 2026-06-19, Disc#1/
+            // peca89; bench-proven on a real C6). A coordinator whose ZBOSS
+            // NVRAM corrupted during operation (e.g. an interrupted flash write
+            // from a power/USB glitch) boots factory-blank (joined=0, panID
+            // 0xFFFF) while its flash still physically holds the old, now-
+            // UNLOADABLE network bytes. GET_NETWORK_BACKUP used to read those
+            // raw bytes and hand them to the host as a "valid" image (the PAN is
+            // visibly present, so no naive check catches it); RESTORE then
+            // writes them back to a coordinator that boots blank again, forever.
+            // Refuse to back up a coordinator that is not currently on a network:
+            // there is nothing ZBOSS-loadable to capture, and a host that stores
+            // such an image gets a backup that can never restore. This runs
+            // under the ZBOSS big-lock (the whole command dispatch switch in
+            // zb_ncp.cpp holds zboss_lock_guard), so the live getters are safe
+            // with no additional lock. Deterministic and format-independent; it
+            // does NOT attempt to replicate ZBOSS's internal dataset CRC.
+            if (!zb_zdo_joined() || zb_get_pan_id() == 0xFFFF) {
+                ESP_LOGE(TAG, "GET_NETWORK_BACKUP REFUSED: not on a network "
+                         "(joined=%d panID=0x%04x) -- no loadable state to back up",
+                         (int)zb_zdo_joined(), (unsigned)zb_get_pan_id());
+                if (s_backup_snapshot) {
+                    free(s_backup_snapshot);
+                    s_backup_snapshot = nullptr;
+                    s_backup_snapshot_size = 0;
+                }
+                full_res->status = GENERIC_OPERATION_FAILED;
+                const uint32_t zero = 0;
+                memcpy(payload,     &zero, 4);
+                memcpy(payload + 4, &zero, 4);
+                return sizeof(generic_response_t) + 8;
+            }
+
             if (s_backup_snapshot && s_backup_snapshot_size != total_size) {
                 free(s_backup_snapshot);
                 s_backup_snapshot = nullptr;
             }
-            if (!s_backup_snapshot) {
+            if (!s_backup_snapshot &&
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >=
+                    total_size + BACKUP_SNAPSHOT_HEAP_MARGIN) {
                 s_backup_snapshot = static_cast<uint8_t*>(malloc(total_size));
             }
             if (s_backup_snapshot) {
@@ -2090,7 +2199,7 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
                      (unsigned long)total_size, s_backup_snapshot != nullptr);
         }
 
-        uint32_t len = 128;
+        uint32_t len = 1024;   // see resp_buffer_size note: 8x fewer round-trips for coex (R2)
         if (offset >= total_size) {
             len = 0;
         } else if (offset + len > total_size) {
@@ -2269,7 +2378,13 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
             // Mark inactive so a duplicate final chunk (e.g. host retry) does
             // not spawn a second reboot task.
             s_restore_session.active = false;
-            xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
+            xTaskCreate([](void*){
+                            vTaskDelay(pdMS_TO_TICKS(1000));   // final-chunk OK response drains first
+                            // FIN the TCP client before the reboot drops WiFi
+                            // (same rationale as ncp_reset_deferred_task).
+                            transport::close_tcp_client();
+                            vTaskDelay(pdMS_TO_TICKS(50));
+                            esp_restart(); },
                         "reboot", 2048, NULL, 5, NULL);
         }
 
@@ -2488,7 +2603,13 @@ struct zb_ncp::cmd_handle<RESTORE_STRUCTURED_BACKUP> : immediate_cmd_process<RES
 
         ESP_LOGI(TAG, "RESTORE_STRUCTURED_BACKUP: %u-byte image stored, rebooting in 1s",
                  (unsigned)inlen);
-        xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
+        xTaskCreate([](void*){
+                            vTaskDelay(pdMS_TO_TICKS(1000));   // final-chunk OK response drains first
+                            // FIN the TCP client before the reboot drops WiFi
+                            // (same rationale as ncp_reset_deferred_task).
+                            transport::close_tcp_client();
+                            vTaskDelay(pdMS_TO_TICKS(50));
+                            esp_restart(); },
                     "rb_struct", 2048, NULL, 5, NULL);
 
         return reply(outdata, GENERIC_OK);

@@ -77,6 +77,15 @@ menu "Zigbee Network Co-processor"
             "XIAO ESP32C6 Getting Started" + arduino-esp32
             variants/XIAO_ESP32C6/pins_arduino.h (WIFI_ENABLE/WIFI_ANT_CONFIG).
 
+    config NCP_TCP_PORT
+        int "NCP TCP server port (wifi-coex Mode B)"
+        default 6638
+        help
+            TCP port the NCP frame stream is served on once the device has WiFi
+            STA credentials (Mode B / wifi-coex variant). Z2M connects with
+            port: tcp://<ip-or-mdns-host>:<port>. 6638 matches the de-facto
+            serial-over-TCP Zigbee-coordinator port (SLZB/Tube/ZigStar).
+
 endmenu
 
 menu "Zigbee"

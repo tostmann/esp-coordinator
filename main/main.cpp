@@ -4,11 +4,13 @@
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "app.h"
+#include "netcfg.h"
 #include "boot_guard.h"
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 // NCP_RESET options 1/2 (NVRAM erase / factory reset) cannot erase flash
 // inline: any multi-sector flash erase while the 802.15.4 radio is active
@@ -35,9 +37,29 @@ static void handle_pending_erase(void)
         if (zb) esp_partition_erase_range(zb, 0, zb->size);
     }
     if (options == 2) {
+        // wifi-coex: a factory reset must NOT deprovision the WiFi STA creds.
+        // The raw erase below wipes the whole nvs partition — on this variant
+        // that includes the "netcfg" namespace, and a creds-less boot lands in
+        // Mode A (Improv-only, no WiFi, no TCP): a z2m factory reset over TCP
+        // would permanently cut its own link, recoverable only by USB
+        // re-provisioning. Factory reset means "forget the ZIGBEE network",
+        // so: lift the creds out, erase, put them back. Best-effort — if NVS
+        // can't be read (corrupt), the erase still proceeds (matching the old
+        // behavior) and the device falls back to Mode A provisioning.
+        char ssid[NETCFG_SSID_MAXLEN] = {0};
+        char psk[NETCFG_PSK_MAXLEN]   = {0};
+        bool have_creds = false;
+        if (nvs_flash_init() == ESP_OK) {
+            have_creds = (netcfg_load(ssid, sizeof(ssid), psk, sizeof(psk)) == ESP_OK);
+            nvs_flash_deinit();   // drop cached page state before the raw erase
+        }
         const esp_partition_t* nvs = esp_partition_find_first(
             ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
         if (nvs) esp_partition_erase_range(nvs, 0, nvs->size);
+        if (have_creds && nvs_flash_init() == ESP_OK) {
+            netcfg_persist(ssid, psk);
+            // leave NVS initialized — app::init's nvs_flash_init is a no-op then
+        }
     }
 }
 
@@ -130,6 +152,17 @@ void mark_zboss_alive()
 void clear()
 {
     g_boot_breadcrumb = BOOT_BC_MAGIC | 0u;
+}
+
+void cancel()
+{
+    // Not a failed boot, and there is no ZBOSS milestone to wait for (Mode A /
+    // provisioning). Clear the breadcrumb and stop the deadline so the 30 s
+    // timer never reboots a healthy non-ZBOSS boot.
+    g_boot_breadcrumb = BOOT_BC_MAGIC | 0u;
+    if (s_deadline) {
+        esp_timer_stop(s_deadline);
+    }
 }
 
 }  // namespace boot_guard

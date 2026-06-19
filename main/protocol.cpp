@@ -51,16 +51,18 @@ static uint8_t next_seq(uint8_t seq) {
 }
 
 void protocol::send_ack(const ncp_header_t& hdr) {
-	// B2 (ported from the wifi-coex branch 2026-06-05, surfaced there by an
-	// adversarial review and live-verified on its build 1.2.36): this path
-	// runs on the app task while send_data_int advances m_tx_seq on the
-	// ZBOSS task under m_tx_sem. The previously UNLOCKED read-modify-write
-	// here could lose an update and put two frames with the SAME packet_seq
-	// on the wire — herdsman then logs "Unexpected packet sequence". Hold
-	// m_tx_sem across the RMW + send, matching send_data_int. Lock order
-	// m_tx_sem -> m_input_sem (inside transport::send) is the same as
-	// send_data_int's; no deadlock — the m_input_buf capacity wait is
-	// bounded and its drainer (app task) never parks on m_tx_sem first.
+	// m_tx_seq is shared: this ACK path runs on the app task (on_rx_packet /
+	// on_rx_int) while send_data_int runs on the ZBOSS task and send_nack on the
+	// app task too. send_data_int already serialises its read-modify-write under
+	// m_tx_sem; this path historically did NOT, so the two writers could read the
+	// same seq and emit two frames carrying a DUPLICATE sequence number (lost
+	// update) — the host then logs "Unexpected packet sequence" and may drop a
+	// frame. Hold m_tx_sem across the seq assignment AND transport::send so the
+	// frame is both uniquely numbered and queued in sequence order, exactly like
+	// send_data_int. (transport.cpp H2 named this race but only guarded m_input_buf;
+	// the m_tx_seq counter was left unprotected until now.) Lock order is always
+	// m_tx_sem -> m_input_sem (the latter taken inside transport::send), matching
+	// send_data_int, so no deadlock is introduced.
 	utils::sem_lock l(m_tx_sem);
 	ncp_header_t rsp = {
 		.signature = {0xde,0xad},
@@ -83,7 +85,7 @@ void protocol::send_ack(const ncp_header_t& hdr) {
 }
 
 void protocol::send_nack(const ncp_header_t& hdr) {
-	// B2: same unlocked-RMW race as send_ack above — see the comment there.
+	// Same m_tx_seq race as send_ack — serialise the RMW + send under m_tx_sem.
 	utils::sem_lock l(m_tx_sem);
 	ncp_header_t rsp = {
 		.signature = {0xde,0xad},
@@ -294,5 +296,38 @@ esp_err_t protocol::init_int() {
 
 esp_err_t protocol::start_int() {
 	return ESP_OK;
+}
+
+void protocol::reset_link_state_int() {
+	// A wifi-coex Mode B TCP client reconnect is a brand-new host process whose
+	// packet sequence restarts at 0. Re-baseline our side to the same post-boot
+	// state init_int() sets up: drop any half-reassembled inbound frame and
+	// restart m_tx_seq at 1 (seq 0 stays reserved for the raw boot ACK / NCP_RESET
+	// frames the transport re-emits on each accept). Without this, m_tx_seq keeps
+	// climbing across the disconnect, so the next session's first frame carries a
+	// stale seq and herdsman logs "Unexpected packet sequence" for the whole link.
+	//
+	// Called from the TCP task at fresh-accept time, while m_tcp_sock is still -1
+	// (so any concurrent send_data is dropped, not leaked to the new client).
+	// m_rx_buffer_pos is owned by the app task in on_rx_int; the transport drains
+	// m_output_buf on disconnect and the app task has emptied its queue well before
+	// a new client connects, so the lock-free reset here cannot tear a concurrent
+	// on_rx_int (size_t store is atomic on RISC-V32; worst case a stale partial
+	// frame survives one accept and resyncs via find_signature). The m_tx_seq
+	// write IS serialised under m_tx_sem so it cannot lose to a spontaneous
+	// INDICATION's send_data_int RMW racing in the publish window.
+	m_rx_buffer_pos = 0;
+	// DUP-1: clear the duplicate-drop baseline too (mirrors init_int). The
+	// previous TCP session's last accepted packet_seq must not survive into the
+	// next one — the fresh host's seq restarts at 0, and a stale match here would
+	// drop its first flagged retransmission as a duplicate instead of delivering
+	// it. Same single-byte-store / app-task-quiescent safety as the
+	// m_rx_buffer_pos reset above, so no lock is needed.
+	m_last_rx_seq = 0;
+	m_last_rx_seq_valid = false;
+	{
+		utils::sem_lock l(m_tx_sem);
+		m_tx_seq = 1;
+	}
 }
 

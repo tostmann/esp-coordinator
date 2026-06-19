@@ -1,0 +1,17 @@
+{
+  "name": "ESP-Coordinator WiFi-Coex (experimental)",
+  "version": "v1.3.62-coex",
+  "funding_url": "https://paypal.me/busware",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C6",
+      "parts": [
+        {
+          "path": "esp-coordinator-esp32c6-wifi-coex-factory.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

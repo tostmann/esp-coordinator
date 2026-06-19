@@ -38,7 +38,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              ${BUILD_NUM_FILE} ${VERSION_FILE})
 
 idf_component_register(SRC_DIRS "."
-                       INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/include")
+                       INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/include"
+                       EMBED_FILES "busware.png")
 
 # Damit der generierte Header VOR dem Compile existiert (configure_file haengt
 # nicht am Component-Lib-Target).

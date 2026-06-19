@@ -41,4 +41,12 @@ void mark_zboss_alive();
 // Called from the NCP_RESET path before the restart.
 void clear();
 
+// Stand the guard down for a boot that legitimately never starts ZBOSS:
+// clears the failure count AND stops the 30 s deadline. Used by the wifi-coex
+// Mode A (Improv-Serial provisioning) path — it runs no ZBOSS stack, so it
+// never reaches mark_zboss_alive(); without this the deadline would reboot the
+// provisioning session and the assume-fail breadcrumb would latch the device
+// into safe mode.
+void cancel();
+
 }  // namespace boot_guard
