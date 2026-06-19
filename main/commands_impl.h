@@ -1524,6 +1524,9 @@ struct zb_ncp::cmd_handle<ZDO_MGMT_LQI_REQ> : request_cmd_process< ZDO_MGMT_LQI_
     }
 };
 
+// esp-zigbee-lib device-leave API (consumed by the ZDO_MGMT_LEAVE_REQ handler).
+#include "zdo/esp_zigbee_zdo_command.h"
+
 // Request that a Remote Device leave the network
 // [CommandId.ZDO_MGMT_LEAVE_REQ]: {
 //     request: [
@@ -1539,20 +1542,50 @@ struct ZDO_MGMT_LEAVE_REQ_args_t {
     uint8_t long_addr[8];
     uint8_t flags;
 }__attribute__((packed));
+// LEAVE-GATE + safe removal (2026-06-19, bench-characterized root cause of the
+// field "spontaneous wipe", Discussion #1). The LOW-LEVEL zdo_mgmt_leave_req()
+// this handler used to call makes the coordinator intermittently (~60-75% per
+// leave, bench-measured) perform an NLME-LEAVE on SELF -> it silently wipes its
+// OWN network (live PIB + persisted NVRAM), live, no reboot. The wipe is target-
+// and param-independent (unknown short, self 0x0000, and a freshly joined child
+// all wipe; DevAddr=0 wipes as much as DevAddr=ieee). z2m sends this leave on
+// every device force-remove -> the field "spontaneous wipe".
+//
+// FIX: route through the OFFICIAL esp-zigbee-lib API esp_zb_zdo_device_leave_req()
+// instead of the raw low-level call. Bench A/B (temp diag cmd, since removed):
+// the low-level call wiped ~2/3 for EVERY target; the esp_zb wrapper wiped 0/12
+// for a remote target and a real joined child survived -> the bug is specific to
+// the raw low-level call. The ONE residual case the wrapper still self-wipes is a
+// leave addressed to dst=0x0000 (the coordinator itself: 6/6), which is
+// semantically "I, the coordinator, leave my own network" -- z2m never sends that
+// for a device removal, so we refuse it. Immediate handler (mirrors
+// NWK_PERMIT_JOINING): reply synchronously, fire the leave async. Runs under the
+// dispatch's zboss_lock_guard, so esp_zb_* is safe here (same recursive osif lock
+// that esp_zb_lock_acquire takes).
 template<>
-struct zb_ncp::cmd_handle<ZDO_MGMT_LEAVE_REQ> : request_cmd_process< ZDO_MGMT_LEAVE_REQ, ZDO_MGMT_LEAVE_REQ_args_t, zb_zdo_mgmt_leave_param_t, zb_zdo_mgmt_leave_res_t > {
-    using Base = request_cmd_process< ZDO_MGMT_LEAVE_REQ, ZDO_MGMT_LEAVE_REQ_args_t, zb_zdo_mgmt_leave_param_t, zb_zdo_mgmt_leave_res_t >;
-    static constexpr size_t additional_buffer_size = 0;
-    static constexpr const char* name = "ZDO_MGMT_LEAVE_REQ";
-    static void format_request(zb_zdo_mgmt_leave_param_t& req, const ZDO_MGMT_LEAVE_REQ_args_t& arg) {
-        memset(&req,0,sizeof(zb_zdo_mgmt_leave_param_t));
-        req.dst_addr = arg.short_addr;
-        memcpy(req.device_address,arg.long_addr,8);
-        req.rejoin = (arg.flags & 0x80) ? 1 : 0;
-    }
-    static uint8_t start_request(uint8_t buf) {
-        //ESP_LOGI(TAG,"S_ZDO_MGMT_LEAVE_REQ start_request device_address: " IEEE_ADDR_FMT " dst_addr:%04x ",IEEE_ADDR_PRINT(s_req.device_address),s_req.dst_addr);
-        return zdo_mgmt_leave_req(buf,&Base::req_cb);
+struct zb_ncp::cmd_handle<ZDO_MGMT_LEAVE_REQ> : immediate_cmd_process<ZDO_MGMT_LEAVE_REQ> {
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t);
+    static size_t process_immediate(const void* inbuf, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        auto resp = reinterpret_cast<generic_response_t*>(outdata);
+        resp->category = STATUS_CATEGORY_ZDO;   // byte-compatible with the old request_cmd_process reply
+        if (inlen < sizeof(ZDO_MGMT_LEAVE_REQ_args_t)) {
+            resp->status = GENERIC_INVALID_PARAMETER;
+            return sizeof(generic_response_t);
+        }
+        ZDO_MGMT_LEAVE_REQ_args_t a;
+        memcpy(&a, inbuf, sizeof(a));   // unaligned-safe copy out of the wire buffer
+        if (a.short_addr == 0x0000) {
+            ESP_LOGW(TAG, "ZDO_MGMT_LEAVE_REQ: refusing self-addressed leave (dst=0x0000 would wipe the coordinator)");
+            resp->status = GENERIC_OPERATION_FAILED;
+            return sizeof(generic_response_t);
+        }
+        esp_zb_zdo_mgmt_leave_req_param_t p; memset(&p, 0, sizeof(p));
+        memcpy(p.device_address, a.long_addr, 8);
+        p.dst_nwk_addr = a.short_addr;
+        p.rejoin = (a.flags & 0x80) ? 1 : 0;
+        esp_zb_zdo_device_leave_req(&p, [](esp_zb_zdp_status_t, void*){}, nullptr);
+        resp->status = GENERIC_OK;   // leave initiated; the target leaves asynchronously
+        return sizeof(generic_response_t);
     }
 };
 
@@ -2051,6 +2084,67 @@ static restore_session_t s_restore_session = { 0, 0, false };
 static uint8_t* s_backup_snapshot = nullptr;
 static uint32_t s_backup_snapshot_size = 0;
 
+// Feature 4 (buffer-before-commit restore gate): the FULL 40 KB restore image
+// (nvs + zb_storage halves) is accumulated in RAM here, and NOTHING is written
+// to flash until the final chunk passes the gross-garbage gate. So a rejected
+// (gross-garbage) restore is side-effect-free -- the user's existing network
+// and WiFi creds survive untouched, with no reboot. nullptr => not buffering
+// (no active restore, or the malloc declined at session start => legacy
+// stream-to-flash: erase-upfront + always-reboot, no gate). Freed at session
+// end / abandon / restart. Single static slot, app event task only -- no lock.
+// Review #4 (LOW): if a host opens a buffered session and then walks away
+// WITHOUT finishing and without an NCP_RESET, this 40 KB block stays allocated.
+// Bounded + self-healing: the next RESTORE (offset==0) frees it via
+// restore_free_buf(), and any reboot (NCP_RESET / commit / a dirtied-flash
+// abort) clears the static outright. This USB-only master has no host-disconnect
+// link-reset hook (coex's release_backup_snapshot reclaim does not exist here),
+// so there is no cheaper deterministic free point; the bound is one block.
+static uint8_t* s_restore_img = nullptr;
+static void restore_free_buf() {
+    if (s_restore_img) { free(s_restore_img); s_restore_img = nullptr; }
+}
+
+// Review #1 (HIGH): once flash has been physically touched this boot -- the
+// legacy malloc-declined path erases nvs+zb_storage upfront, and the buffered
+// commit path erases before writing -- the coordinator can NO LONGER be left
+// running on a half-/de-init'd NVS. So from that point on, EVERY terminal exit
+// (incl. a later buffered gate-reject from a *different* session, or a
+// mid-stream protocol error) MUST reboot, where app::init re-mounts a clean
+// partition next boot. This is a per-boot latch: set once, never cleared until
+// the reboot it forces. Without it, the sequence "legacy session erases ->
+// host abandons -> a fresh buffered session rejects and returns 'preserved'"
+// leaves the device on dead NVS until a power-cycle.
+static bool s_restore_flash_dirty   = false;
+static bool s_restore_reboot_pending = false;
+
+static void restore_schedule_reboot() {
+    if (s_restore_reboot_pending) return;   // idempotent: one reboot task only
+    s_restore_reboot_pending = true;
+    ESP_LOGI(TAG, "RESTORE_NETWORK: rebooting in 1s");
+    xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
+                "reboot", 2048, NULL, 5, NULL);
+}
+
+static size_t restore_reply(uint8_t* outdata, ncp_generic_status_t status) {
+    auto r = reinterpret_cast<generic_response_t*>(outdata);
+    r->category = STATUS_CATEGORY_GENERIC;
+    r->status   = status;
+    return sizeof(generic_response_t);
+}
+
+// Terminal failure exit for RESTORE_NETWORK. Frees the RAM buffer and closes
+// the session (review #3: mid-session validation failures used to leak the
+// 40 KB s_restore_img and leave `active` set), and -- if flash was already
+// dirtied this boot -- schedules the reboot (review #1). A pure buffered
+// reject that never touched flash stays side-effect-free (no reboot): that is
+// the buffer-before-commit guarantee.
+static size_t restore_fail(uint8_t* outdata, ncp_generic_status_t status) {
+    restore_free_buf();
+    s_restore_session.active = false;
+    if (s_restore_flash_dirty) restore_schedule_reboot();
+    return restore_reply(outdata, status);
+}
+
 template <>
 struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWORK_BACKUP> {
     static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 128;
@@ -2086,6 +2180,38 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         // restarted pull gets fresh data. Allocation/read failure degrades to
         // the original per-chunk direct reads below.
         if (offset == 0) {
+            // === BACKUP-1 poison-backup guard (root-caused 2026-06-19, Disc#1/
+            // peca89; bench-proven on a real C6). A coordinator whose ZBOSS
+            // NVRAM corrupted during operation (e.g. an interrupted flash write
+            // from a power/USB glitch) boots factory-blank (joined=0, panID
+            // 0xFFFF) while its flash still physically holds the old, now-
+            // UNLOADABLE network bytes. GET_NETWORK_BACKUP used to read those
+            // raw bytes and hand them to the host as a "valid" image (the PAN is
+            // visibly present, so no naive check catches it); RESTORE then
+            // writes them back to a coordinator that boots blank again, forever.
+            // Refuse to back up a coordinator that is not currently on a network:
+            // there is nothing ZBOSS-loadable to capture, and a host that stores
+            // such an image gets a backup that can never restore. This runs
+            // under the ZBOSS big-lock (the whole command dispatch switch in
+            // zb_ncp.cpp holds zboss_lock_guard), so the live getters are safe
+            // with no additional lock. Deterministic and format-independent; it
+            // does NOT attempt to replicate ZBOSS's internal dataset CRC.
+            if (!zb_zdo_joined() || zb_get_pan_id() == 0xFFFF) {
+                ESP_LOGE(TAG, "GET_NETWORK_BACKUP REFUSED: not on a network "
+                         "(joined=%d panID=0x%04x) -- no loadable state to back up",
+                         (int)zb_zdo_joined(), (unsigned)zb_get_pan_id());
+                if (s_backup_snapshot) {
+                    free(s_backup_snapshot);
+                    s_backup_snapshot = nullptr;
+                    s_backup_snapshot_size = 0;
+                }
+                full_res->status = GENERIC_OPERATION_FAILED;
+                const uint32_t zero = 0;
+                memcpy(payload,     &zero, 4);
+                memcpy(payload + 4, &zero, 4);
+                return sizeof(generic_response_t) + 8;
+            }
+
             if (s_backup_snapshot && s_backup_snapshot_size != total_size) {
                 free(s_backup_snapshot);
                 s_backup_snapshot = nullptr;
@@ -2172,6 +2298,55 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
     }
 };
 
+// Feature 4: gross-garbage gate for a restored zb_storage image. HONEST SCOPE --
+// catches truncated/zeroed/garbage uploads (all-0xFF, all-0x00, wrong page
+// magic) but CANNOT catch peca-class subtle corruption (a structurally valid
+// page ZBOSS rejects on its closed-lib per-dataset tail CRC). The page magic was
+// reverse-engineered from real C6 images (healthy self vs peca89 poison; both
+// NVRAM format version 11) -- we ACCEPT on an unexpected version rather than
+// risk false-rejecting a legitimate newer / other-target image.
+// Review #5 (doc): the gate validates ONLY the zb_storage half (the ZBOSS
+// network NVRAM). A garbage `nvs` half paired with a valid `zb_storage` half
+// PASSES and force-reboots. Bounded/self-healing on this USB-only master: the
+// nvs partition carries no WiFi creds here, and app.cpp re-inits/erases an
+// unmountable nvs on boot. A full nvs validation is deliberately not attempted.
+static constexpr uint32_t ZB_NVRAM_PAGE_SZ    = 0x2000;      // 8 KB, two per zb_storage half
+static constexpr uint32_t ZB_NVRAM_PAGE_MAGIC = 0x001e0040;  // (+0x04) len=0x40, type=0x1e=PAGE_HDR
+
+// Classify one 0x2000 ZBOSS NVRAM page from a RAM buffer. NO zb_* calls.
+//   0 = page header invalid (gross garbage)
+//   1 = valid header, no data records (inactive/empty page)
+//   2 = valid header AND >=1 well-formed dataset record
+static int zb_nvram_page_class(const uint8_t* p) {
+    uint32_t magic, v1, v2, seq;
+    uint16_t rlen, rtype;
+    memcpy(&magic, p + 0x04, 4);   // unaligned-safe
+    memcpy(&v1,    p + 0x08, 4);
+    memcpy(&v2,    p + 0x10, 4);
+    if (magic != ZB_NVRAM_PAGE_MAGIC) return 0;
+    if ((v1 != 10 && v1 != 11) || (v2 != 10 && v2 != 11)) {
+        ESP_LOGW(TAG, "RESTORE_NETWORK gate: unexpected NVRAM version %lu/%lu (accepting)",
+                 (unsigned long)v1, (unsigned long)v2);
+    }
+    memcpy(&seq,   p + 0x40 + 0, 4);  // first dataset record sits after the 0x40 page header
+    memcpy(&rlen,  p + 0x40 + 4, 2);
+    memcpy(&rtype, p + 0x40 + 6, 2);
+    if (seq == 0xFFFFFFFFu || rlen == 0xFFFF) return 1;   // header OK, no records
+    if (rlen == 0 || rlen > ZB_NVRAM_PAGE_SZ) return 0;   // malformed record length
+    if (rtype >= 64) return 0;                            // dataset type out of enum range
+    return 2;
+}
+
+// Gate the assembled 16 KB zb_storage half: accept iff at least one page carries
+// a well-formed dataset record (rejects all-0xFF / all-0x00 / wrong-magic).
+static bool zb_storage_image_ok(const uint8_t* img, uint32_t size) {
+    bool any_record = false;
+    for (uint32_t off = 0; off + ZB_NVRAM_PAGE_SZ <= size; off += ZB_NVRAM_PAGE_SZ) {
+        if (zb_nvram_page_class(img + off) >= 2) any_record = true;
+    }
+    return any_record;
+}
+
 template <>
 struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWORK> {
     // Bug pre-fix: resp_buffer_size was 0 but process_immediate writes a
@@ -2179,17 +2354,10 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
     // outdata buffer. Now sized correctly.
     static constexpr size_t resp_buffer_size = sizeof(generic_response_t);
 
-    static size_t reply(uint8_t* outdata, ncp_generic_status_t status) {
-        auto r = reinterpret_cast<generic_response_t*>(outdata);
-        r->category = STATUS_CATEGORY_GENERIC;
-        r->status   = status;
-        return sizeof(generic_response_t);
-    }
-
     static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
         if (inlen < 8) {
             ESP_LOGE(TAG, "RESTORE_NETWORK: short frame %d", int(inlen));
-            return reply(outdata, GENERIC_INVALID_PARAMETER);
+            return restore_fail(outdata, GENERIC_INVALID_PARAMETER);
         }
 
         const uint8_t* in_ptr = static_cast<const uint8_t*>(inbuffer);
@@ -2203,7 +2371,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
         const auto zb_part  = backup_zb_partition();
         if (!nvs_part || !zb_part) {
             ESP_LOGE(TAG, "RESTORE_NETWORK: partitions missing (nvs=%p zb=%p)", nvs_part, zb_part);
-            return reply(outdata, GENERIC_OPERATION_FAILED);
+            return restore_fail(outdata, GENERIC_OPERATION_FAILED);
         }
         const uint32_t capacity = nvs_part->size + zb_part->size;
 
@@ -2211,13 +2379,13 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
         if (total_size != capacity) {
             ESP_LOGE(TAG, "RESTORE_NETWORK: total_size %lu != capacity %lu",
                      (unsigned long)total_size, (unsigned long)capacity);
-            return reply(outdata, GENERIC_INVALID_PARAMETER);
+            return restore_fail(outdata, GENERIC_INVALID_PARAMETER);
         }
         // C3: chunk must stay strictly inside the image.
         if (offset > capacity || chunk_length > capacity - offset) {
             ESP_LOGE(TAG, "RESTORE_NETWORK: chunk OOB offset=%lu len=%lu cap=%lu",
                      (unsigned long)offset, (unsigned long)chunk_length, (unsigned long)capacity);
-            return reply(outdata, GENERIC_INVALID_PARAMETER);
+            return restore_fail(outdata, GENERIC_INVALID_PARAMETER);
         }
 
         // C2: session ordering. offset==0 opens (or restarts) a session and
@@ -2233,18 +2401,35 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
                          (unsigned long)s_restore_session.total_size);
             }
             ESP_LOGI(TAG, "RESTORE_NETWORK: begin, total %lu bytes", (unsigned long)total_size);
-            extern esp_err_t nvs_flash_deinit(void);
-            nvs_flash_deinit();
-            esp_err_t er_nvs = esp_partition_erase_range(nvs_part, 0, nvs_part->size);
-            esp_err_t er_zb  = esp_partition_erase_range(zb_part,  0, zb_part->size);
-            if (er_nvs != ESP_OK || er_zb != ESP_OK) {
-                // M1: a failed erase leaves NVS half-wiped. Abort the session and
-                // do NOT open it / schedule a reboot — booting on a partially
-                // erased nvs/zb_storage bricks the coordinator.
-                ESP_LOGE(TAG, "RESTORE_NETWORK: erase failed nvs=%s zb=%s",
-                         esp_err_to_name(er_nvs), esp_err_to_name(er_zb));
-                s_restore_session.active = false;
-                return reply(outdata, GENERIC_OPERATION_FAILED);
+            restore_free_buf();   // drop any buffer left by an abandoned session
+            // F4 buffer-before-commit: accumulate the WHOLE image in RAM and write
+            // NOTHING to flash until the final chunk passes the gate -- so a
+            // rejected (gross-garbage) restore leaves nvs + zb_storage entirely
+            // untouched (no broken NVS, no lost creds, no reboot). On a malloc
+            // failure we degrade to the legacy erase-upfront + stream-to-flash
+            // path (always reboots, no gate) -- matches the GET snapshot idiom.
+            s_restore_img = static_cast<uint8_t*>(malloc(capacity));
+            if (s_restore_img) {
+                memset(s_restore_img, 0xFF, capacity);  // unfilled regions look erased
+                // nvs + zb_storage stay intact on flash for the whole upload.
+            } else {
+                ESP_LOGW(TAG, "RESTORE_NETWORK: buffer declined (heap), streaming without gate");
+                extern esp_err_t nvs_flash_deinit(void);
+                nvs_flash_deinit();
+                // Flash is about to be erased -- latch dirty so EVERY later exit
+                // reboots (review #1), including a failed erase below.
+                s_restore_flash_dirty = true;
+                esp_err_t er_nvs = esp_partition_erase_range(nvs_part, 0, nvs_part->size);
+                esp_err_t er_zb  = esp_partition_erase_range(zb_part,  0, zb_part->size);
+                if (er_nvs != ESP_OK || er_zb != ESP_OK) {
+                    // M1: a failed erase leaves NVS half-wiped. We have already
+                    // de-init'd + (partially) erased nvs, so we can NOT keep running
+                    // -- restore_fail() reboots because flash is dirty, landing on a
+                    // clean re-mount next boot instead of a half-erased partition.
+                    ESP_LOGE(TAG, "RESTORE_NETWORK: erase failed nvs=%s zb=%s",
+                             esp_err_to_name(er_nvs), esp_err_to_name(er_zb));
+                    return restore_fail(outdata, GENERIC_OPERATION_FAILED);
+                }
             }
             s_restore_session.active      = true;
             s_restore_session.total_size  = total_size;
@@ -2253,52 +2438,103 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
             if (!s_restore_session.active) {
                 ESP_LOGE(TAG, "RESTORE_NETWORK: chunk at offset %lu without active session",
                          (unsigned long)offset);
-                return reply(outdata, GENERIC_INVALID_STATE);
+                return restore_fail(outdata, GENERIC_INVALID_STATE);
             }
             if (offset != s_restore_session.next_offset) {
                 ESP_LOGE(TAG, "RESTORE_NETWORK: out-of-order chunk: got %lu, expected %lu",
                          (unsigned long)offset, (unsigned long)s_restore_session.next_offset);
-                return reply(outdata, GENERIC_INVALID_PARAMETER);
+                return restore_fail(outdata, GENERIC_INVALID_PARAMETER);
             }
         }
 
-        // Split the chunk across the nvs/zb_storage boundary if it straddles.
+        // Accumulate (F4 buffering) or, on the legacy low-heap path, stream
+        // straight to flash splitting across the nvs/zb_storage boundary.
         if (chunk_length > 0) {
-            esp_err_t we = ESP_OK;
-            if (offset < nvs_part->size) {
-                uint32_t write_len = chunk_length;
-                if (offset + write_len > nvs_part->size) {
-                    write_len = nvs_part->size - offset;
-                }
-                we = esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
-                if (we == ESP_OK && write_len < chunk_length) {
-                    we = esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
-                }
+            if (s_restore_img) {
+                // F4 buffering: just accumulate; flash is written only at commit.
+                memcpy(s_restore_img + offset, in_ptr + 8, chunk_length);
             } else {
-                we = esp_partition_write(zb_part, offset - nvs_part->size, in_ptr + 8, chunk_length);
-            }
-            if (we != ESP_OK) {
-                // M1: bail on a failed flash write instead of marching to the
-                // completion reboot with a corrupt image.
-                ESP_LOGE(TAG, "RESTORE_NETWORK: write failed at offset %lu: %s",
-                         (unsigned long)offset, esp_err_to_name(we));
-                s_restore_session.active = false;
-                return reply(outdata, GENERIC_OPERATION_FAILED);
+                esp_err_t we = ESP_OK;
+                if (offset < nvs_part->size) {
+                    uint32_t write_len = chunk_length;
+                    if (offset + write_len > nvs_part->size) {
+                        write_len = nvs_part->size - offset;
+                    }
+                    we = esp_partition_write(nvs_part, offset, in_ptr + 8, write_len);
+                    if (we == ESP_OK && write_len < chunk_length) {
+                        we = esp_partition_write(zb_part, 0, in_ptr + 8 + write_len, chunk_length - write_len);
+                    }
+                } else {
+                    we = esp_partition_write(zb_part, offset - nvs_part->size, in_ptr + 8, chunk_length);
+                }
+                if (we != ESP_OK) {
+                    // M1: bail on a failed flash write instead of marching to the
+                    // completion reboot with a corrupt image. Flash is already
+                    // erased+partially-written this boot, so restore_fail() reboots
+                    // (review #1) -- a clean re-mount beats running on a torn nvs.
+                    ESP_LOGE(TAG, "RESTORE_NETWORK: write failed at offset %lu: %s",
+                             (unsigned long)offset, esp_err_to_name(we));
+                    return restore_fail(outdata, GENERIC_OPERATION_FAILED);
+                }
             }
         }
 
         s_restore_session.next_offset = offset + chunk_length;
 
         if (s_restore_session.next_offset >= s_restore_session.total_size) {
-            ESP_LOGI(TAG, "RESTORE_NETWORK: complete, rebooting in 1s");
-            // Mark inactive so a duplicate final chunk (e.g. host retry) does
-            // not spawn a second reboot task.
+            // Mark inactive so a duplicate final chunk (host retry) does not
+            // re-run the gate / spawn a second reboot task.
             s_restore_session.active = false;
-            xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); },
-                        "reboot", 2048, NULL, 5, NULL);
+            // F4: gate the buffered image before committing ANYTHING to flash.
+            // Gross garbage (all-FF/all-00/wrong-magic zb_storage) -> reject with
+            // NOTHING written: nvs + zb_storage + WiFi creds all survive untouched,
+            // no reboot, the host learns it failed. HONEST: a peca-class subtle
+            // corruption PASSES this gate (it is structurally a real network) --
+            // only Feature 1 (silent-wipe detection) catches that class.
+            if (s_restore_img) {
+                if (!zb_storage_image_ok(s_restore_img + nvs_part->size, zb_part->size)) {
+                    ESP_LOGE(TAG, "RESTORE_NETWORK: image failed gross-garbage gate "
+                                  "-- nothing written, prior state preserved");
+                    // restore_fail() reboots ONLY if a prior (legacy) session
+                    // already dirtied flash this boot (review #1); a pure buffered
+                    // reject never touched flash -> side-effect-free, no reboot.
+                    return restore_fail(outdata, GENERIC_OPERATION_FAILED);
+                }
+                // Gate passed: commit BOTH halves. Erasing irreversibly destroys
+                // the old network, so from here flash is dirty and we ALWAYS reboot
+                // (NVS is deinit'd; app::init re-mounts it next boot).
+                extern esp_err_t nvs_flash_deinit(void);
+                nvs_flash_deinit();
+                s_restore_flash_dirty = true;
+                esp_err_t e1 = esp_partition_erase_range(nvs_part, 0, nvs_part->size);
+                esp_err_t e2 = esp_partition_erase_range(zb_part,  0, zb_part->size);
+                esp_err_t e3 = (e1 == ESP_OK)
+                    ? esp_partition_write(nvs_part, 0, s_restore_img, nvs_part->size) : e1;
+                esp_err_t e4 = (e2 == ESP_OK)
+                    ? esp_partition_write(zb_part, 0, s_restore_img + nvs_part->size, zb_part->size) : e2;
+                if (e3 != ESP_OK || e4 != ESP_OK) {
+                    // Review #2: a partial write must NOT persist a truncated/torn
+                    // zb_storage page for ZBOSS to choke on (the peca corruption
+                    // class). The old network is already gone (we erased it), so
+                    // make the forced reboot land CLEAN: wipe zb_storage so ZBOSS
+                    // boots factory-new instead of half-written. Free the buffer
+                    // AFTER the result check (so it was available for a retry had
+                    // one been added) -- review #2.
+                    ESP_LOGE(TAG, "RESTORE_NETWORK: commit failed nvs=%s zb=%s "
+                                  "-- erasing zb_storage to clean-blank, then reboot",
+                             esp_err_to_name(e3), esp_err_to_name(e4));
+                    esp_partition_erase_range(zb_part, 0, zb_part->size);
+                    restore_free_buf();
+                    restore_schedule_reboot();
+                    return restore_reply(outdata, GENERIC_OPERATION_FAILED);
+                }
+                restore_free_buf();
+            }
+            ESP_LOGI(TAG, "RESTORE_NETWORK: complete, rebooting in 1s");
+            restore_schedule_reboot();
         }
 
-        return reply(outdata, GENERIC_OK);
+        return restore_reply(outdata, GENERIC_OK);
     }
 };
 
