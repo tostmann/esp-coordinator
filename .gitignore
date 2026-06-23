@@ -25,6 +25,7 @@
 /binaries/*
 !/binaries/factory.bin
 !/binaries/factory-c5.bin
+!/binaries/factory-h2.bin
 /main/*.orig
 /main/*.rej
 

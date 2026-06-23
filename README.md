@@ -13,6 +13,8 @@ The ESP32-C6 disrupts the traditional Zigbee Coordinator market (dominated by Te
 **Virtually ANY ESP32-C6 board on the market (including generic $3 boards from China) works out-of-the-box as a high-end Coordinator.** You do not need specialized "coordinator" dongles anymore.
 
 > **Also supported: ESP32-C5 (since v1.4.0).** The exact same firmware builds for the ESP32-C5, and the web flasher auto-detects which chip is connected. The **ESP32-C6 remains the reference platform** — the C5's dual-band Wi-Fi brings no benefit to a USB coordinator (its 802.15.4 radio is 2.4 GHz only), and the Wi-Fi-coexistence build below is **C6-only**. Choose the C5 simply if that is the board you have.
+>
+> **Also supported: ESP32-H2 (since v1.5.0).** The same firmware builds for the ESP32-H2, validated end-to-end on real H2 silicon (USB-Serial/JTAG NCP transport, 802.15.4 network formation, NVRAM resume across reboot, on-air device pairing). The H2 has **no Wi-Fi at all** (802.15.4 + BLE only), so the Wi-Fi-coexistence build does not apply to it — it is a pure USB coordinator. Note: the 1900K application partition requires a **4 MB flash** board (e.g. ESP32-H2-MINI-1).
 
 ### 🚀 Key Advantages Over the Competition
 
