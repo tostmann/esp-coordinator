@@ -609,7 +609,13 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
     case ZB_ZDO_SIGNAL_DEVICE_ANNCE: {
         ESP_LOGD(TAG,"ZB_ZDO_SIGNAL_DEVICE_ANNCE");
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_device_annce_params_t);
-        zb_ncp::indication(ZDO_DEV_ANNCE_IND,parameters,sizeof(zb_zdo_signal_device_annce_params_t));
+        // NCP spec 3.5.3.12: [nwk(2)|ieee(8)|capability(1)] = 11 bytes — the raw
+        // struct matches field-wise but carries 1 alignment pad byte; send spec-exact.
+        uint8_t annce[2 + sizeof(zb_ieee_addr_t) + 1];
+        memcpy(annce, &parameters->device_short_addr, 2);
+        memcpy(annce + 2, parameters->ieee_addr, sizeof(zb_ieee_addr_t));
+        annce[10] = parameters->capability;
+        zb_ncp::indication(ZDO_DEV_ANNCE_IND,annce,sizeof(annce));
     } break;
     case ZB_ZDO_SIGNAL_LEAVE: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_leave_params_t);
@@ -622,7 +628,13 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
     case ZB_ZDO_SIGNAL_LEAVE_INDICATION: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_leave_indication_params_t);
         ESP_LOGD(TAG,"ZB_ZDO_SIGNAL_LEAVE_INDICATION");
-        zb_ncp::indication(NWK_LEAVE_IND,parameters,sizeof(zb_zdo_signal_leave_indication_params_t));
+        // NCP spec 3.5.5.10: payload is [ieee(8)|rejoin(1)] — the ZBOSS signal
+        // struct carries a leading short_addr the host must not see (hosts would
+        // misparse short++ieee[0:6] as the IEEE address).
+        uint8_t payload[sizeof(zb_ieee_addr_t) + 1];
+        memcpy(payload, parameters->device_addr, sizeof(zb_ieee_addr_t));
+        payload[sizeof(zb_ieee_addr_t)] = parameters->rejoin;
+        zb_ncp::indication(NWK_LEAVE_IND,payload,sizeof(payload));
     } break;
     case ZB_ZDO_DEVICE_UNAVAILABLE: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_device_unavailable_params_t);
@@ -635,7 +647,13 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
         ESP_LOGD(TAG,"addr: %04x status: %d parent: %04x",parameters->short_addr,int(parameters->status),parameters->parent_short);
 
     
-        zb_ncp::indication(ZDO_DEV_UPDATE_IND,parameters,sizeof(zb_zdo_signal_device_update_params_t));
+        // NCP spec 3.5.3.20: [ieee(8)|nwk(2)|status(1)] = 11 bytes — the raw struct
+        // additionally carries tc_action + parent_short, which are not in the spec.
+        uint8_t update[sizeof(zb_ieee_addr_t) + 2 + 1];
+        memcpy(update, parameters->long_addr, sizeof(zb_ieee_addr_t));
+        memcpy(update + 8, &parameters->short_addr, 2);
+        update[10] = parameters->status;
+        zb_ncp::indication(ZDO_DEV_UPDATE_IND,update,sizeof(update));
         // {name: 'ieee', type: DataType.IEEE_ADDR},
         // {name: 'nwk', type: DataType.UINT16},
         // {name: 'status', type: DataType.UINT8, typed: DeviceUpdateStatus},
