@@ -555,9 +555,10 @@ async function _identifyOnPortSingle(port, logger) {
         const r2 = await zboss.sendCommand(0x0024 /* GET_COORDINATOR_VERSION */, new Uint8Array(0));
         if (r2[1] === 0) setField('info-coord', `busware.de ESP32 (ZBOSS) · NCP rev ${r2[2]}`);
 
-        // Local IEEE — arg=0 (primary mac).
+        // Local IEEE — arg=0 (primary mac). Firmware now sends LSB-first (wire/LE
+        // order, issue #6 fix); reverse for canonical MSB-first display.
         const r3 = await zboss.sendCommand(0x000b /* GET_LOCAL_IEEE_ADDR */, new Uint8Array([0]));
-        if (r3[1] === 0) setField('info-ieee', formatIEEE(r3.slice(3, 11)));
+        if (r3[1] === 0) setField('info-ieee', formatIEEE(r3.slice(3, 11).reverse()));
 
         // Role.
         const r4 = await zboss.sendCommand(0x0004 /* GET_ZIGBEE_ROLE */, new Uint8Array(0));

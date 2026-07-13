@@ -72,6 +72,10 @@ public:
 	static void on_rx_data(const void* data,size_t size);
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);
+	// Periodic watchdog (driven from the app event pump): reclaims APSDE_DATA_REQ
+	// slots whose TX-confirm never returned, so a permanently-offline polled
+	// device can't saturate the shared 16-slot table into network-wide stalls.
+	static void request_watchdog_tick();
 
 	// Intercept hook for malformed ZDP Simple_Desc_rsp frames. The ZBOSS
 	// stack parser (libzboss_stack.zczr.a) does a strict

@@ -488,6 +488,34 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
   return ZB_TRUE;
 }
 
+// Watchdog timeout: comfortably beyond any legitimate APS confirm (host request
+// timeouts are ~10 s; APS ack retries + sleepy indirect delivery resolve well
+// under that), so we only ever reclaim slots whose confirm is genuinely lost.
+static constexpr uint32_t APSDE_WATCHDOG_TIMEOUT_MS = 20000;
+
+void zb_ncp::request_watchdog_tick() {
+    // Rate-limit to ~2 s regardless of how often the pump calls us (a busy
+    // queue would otherwise contend the resolver mutex per event). The static
+    // is app-task-only (the pump), so unraced.
+    static uint32_t s_last = 0;
+    uint32_t now = xTaskGetTickCount();
+    if ((uint32_t)(now - s_last) < pdMS_TO_TICKS(2000)) return;
+    s_last = now;
+    using Cmd = cmd_handle<APSDE_DATA_REQ>;
+    cmd_t stale[MAX_PARALLEL_REQUESTS];
+    size_t n = Cmd::reclaim_stale(now, pdMS_TO_TICKS(APSDE_WATCHDOG_TIMEOUT_MS),
+                                  stale, MAX_PARALLEL_REQUESTS);
+    // FREE-ONLY: we reclaim the leaked slot (the whole point — keep the shared
+    // table from saturating) but deliberately do NOT send the host a failure.
+    // The host (herdsman) times its APSDE waitress out at ~10 s, long before our
+    // 20 s reclaim, and reuses the 8-bit NCP tsn for later requests — a late
+    // response here could false-match one of those. Silent reclaim is strictly
+    // safer and loses nothing (the host already gave up and retries on its own).
+    for (size_t i = 0; i < n; ++i) {
+        ESP_LOGW(TAG, "APSDE watchdog: reclaimed stale request tsn=%d", int(stale[i].tsn));
+    }
+}
+
 void zb_ncp::send_boot_ready_frame() {
     static const uint8_t boot_ready_frame[] = {
         0xDE, 0xAD,             // signature

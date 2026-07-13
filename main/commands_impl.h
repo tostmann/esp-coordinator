@@ -368,10 +368,33 @@ struct zb_ncp::cmd_handle<GET_LOCAL_IEEE_ADDR> : immediate_cmd_process<GET_LOCAL
             status = GENERIC_INVALID_PARAMETER_1;
         } else {
             res->mac = arg;
-            auto ret = esp_read_mac(res->ieee,ESP_MAC_IEEE802154);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG,"failed read mac addres: %d",ret);
-                status = GENERIC_ERROR;
+            // issue #6: IEEE_ADDR is little-endian on the ZBOSS-NCP wire; the host
+            // (zigbee-herdsman readIeeeAddr / eui64LEBufferToHex) reverses the 8
+            // bytes. The old esp_read_mac(ESP_MAC_IEEE802154) returned canonical
+            // MSB-first EUI-64, so the host recorded a byte-reversed *phantom*
+            // coordinator IEEE and bound devices to it -> endless NWK_addr_req loop.
+            // esp_zb_get_long_address() returns the OPERATIONAL long address already
+            // in LE == wire order (the byte order ZBOSS uses on-air and for the backup
+            // TLV) and reflects a RESTORE_NETWORK transplant (esp_zb_set_long_address).
+            // Emit it verbatim.
+            esp_zb_ieee_addr_t longaddr;
+            esp_zb_get_long_address(longaddr);
+            bool valid = false;
+            for (int i = 0; i < 8; i++) { if (longaddr[i]) { valid = true; break; } }
+            if (valid) {
+                memcpy(res->ieee, longaddr, 8);
+            } else {
+                // Cold-boot fallback: long address not yet populated in the PIB.
+                // efuse EUI-64 is MSB-first canonical; reverse into LE wire order.
+                // For a non-restored coordinator this equals the operational addr.
+                uint8_t eui[8];
+                auto ret = esp_read_mac(eui,ESP_MAC_IEEE802154);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG,"failed read mac addres: %d",ret);
+                    status = GENERIC_ERROR;
+                } else {
+                    for (int i = 0; i < 8; i++) res->ieee[i] = eui[7 - i];
+                }
             }
         }
     }
@@ -1957,6 +1980,7 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     		return;
     	}
     	utils::sem_lock l(request_resolver_mutex());
+    	req.t_exec = xTaskGetTickCount();
     	req.state = ResolveStrategy::request_t::S_EXEC;
     }
     static void process(const zb_ncp::cmd_t& cmd, const void *buffer, size_t len) {
