@@ -149,16 +149,52 @@ PR #74). Until those land, **Zigbee2MQTT via
 path** for this hardware. The ZHA route is usable for getting the coordinator
 recognised and a network formed, but is still labelled early.
 
-## Still open in our working backlog
+## Likely resolved — pending confirmation
 
 ### [andryblack#17](https://github.com/andryblack/esp-coordinator/issues/17) — Sensors don't auto-report (manual poll works)
 
-Tracked. Suspected sleepy-end-device / PIM handling — these devices don't
-poll the coordinator on a fast enough cadence to surface attribute updates as
-they happen. Not investigated in detail yet. Symptom matches Aqara/Mijia/Hue
-battery-powered sensors. If you can reproduce, please re-open on
-[tostmann/esp-coordinator/issues](https://github.com/tostmann/esp-coordinator/issues)
-with the device model + `_TZxxxx_…` or vendor manuf-code so we can categorise.
+**Likely fixed in [`v1.5.73`](https://github.com/tostmann/esp-coordinator/releases/tag/v1.5.73) — unconfirmed for the specific devices in this report.**
+
+The originally-suspected cause (sleepy-end-device / PIM cadence) was wrong. The
+real root cause surfaced while debugging
+[tostmann/esp-coordinator#6](https://github.com/tostmann/esp-coordinator/issues/6):
+the firmware's `GET_LOCAL_IEEE_ADDR` command returned the coordinator's own
+64-bit IEEE address **with the bytes reversed**. The host (Zigbee2MQTT /
+`zigbee-herdsman`) parses that field little-endian, so it stored a byte-reversed
+*phantom* address for the coordinator and handed that phantom out as the bind
+destination to every device that binds to the coordinator by IEEE address.
+
+Battery-powered sensors are exactly the affected class. To send a *bound*
+report a device first resolves the coordinator's IEEE with a broadcast
+`NWK_addr_req`; it gets no answer (no device owns the phantom address) and so
+never delivers the report — while a **manual read**, which addresses the
+coordinator by its short address `0x0000` (always correct), works. That matches
+the "manual poll works, auto-report doesn't" symptom precisely. In #6 the
+phantom bind targets were written against the PowerCfg / battery cluster
+(`0x0001`) among others, which is the reporting path these sensors use.
+
+Two things worth noting:
+
+- The bug was present since the firmware's very first release, so **every**
+  affected install stored the phantom coordinator address.
+- In #6, after flashing v1.5.73 and re-pairing, battery auto-reports from an
+  IKEA blind (E2102) and an open/close remote (E1766) came back — the same
+  reporting class as this report.
+
+**Unconfirmed:** whether the specific Aqara / Mijia / Hue devices in *this*
+report hung on this exact mechanism. Some of those vendors have their own
+reporting quirks, and the original hardware is not available to us (this repo is
+archived). It is the most likely explanation, not a proven one.
+
+**What to do:** flash
+[`v1.5.73`](https://github.com/tostmann/esp-coordinator/releases/tag/v1.5.73)
+(web flasher at [install.busware.de/zboss](https://install.busware.de/zboss/)),
+then **re-pair** the affected sensors — or run *Reconfigure* on them — so they
+re-bind to the corrected coordinator address. Flashing alone is not enough: the
+device keeps chasing the phantom address stored in its own binding table until
+it is re-bound. If auto-reporting still fails afterwards, please open a new
+issue on [tostmann/esp-coordinator/issues](https://github.com/tostmann/esp-coordinator/issues)
+with the device model + vendor manuf-code so we can categorise.
 
 ## Not actionable / stale
 
