@@ -302,3 +302,15 @@ extern "C" void wifi_coex_current_ip(char *buf, size_t len) {
         snprintf(buf, len, IPSTR, IP2STR(&ip.ip));
     }
 }
+
+extern "C" bool wifi_coex_current_rssi(int8_t *out) {
+    // Read-only STA RSSI for the HTTP health page. esp_wifi_* is its own
+    // thread-safe domain (NOT ZBOSS), so this is safe from the httpd task.
+    // Returns false (no row shown) when not associated or the coex arbiter
+    // makes the query transiently fail.
+    if (!out || !s_got_ip) return false;
+    wifi_ap_record_t ap = {};
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
+    *out = ap.rssi;
+    return true;
+}

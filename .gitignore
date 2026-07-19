@@ -24,6 +24,8 @@
 /idf_env.sh
 /binaries/*
 !/binaries/factory.bin
+!/binaries/factory-c5.bin
+!/binaries/factory-h2.bin
 /main/*.orig
 /main/*.rej
 
@@ -54,3 +56,7 @@
 # mid-write crash must not be swept into a snapshot by the hook's `git add -A`.
 *.tmp
 __pycache__/
+
+# stray build objects / lab artefacts (accidental adds 2026-06)
+*.obj
+LAB_WIFI*

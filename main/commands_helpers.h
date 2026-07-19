@@ -239,6 +239,7 @@ struct request_cmd_resolver {
 		Arg arg;
 		zb_ncp::cmd_t cmd;
 		size_t old;
+		uint32_t t_exec;   // FreeRTOS tick when the slot entered S_EXEC (watchdog)
 		uint8_t tsn;
 		enum state_t : uint8_t {
 			S_NONE,
@@ -331,6 +332,26 @@ struct request_cmd_resolver {
 		}
 		return false;
 	}
+
+	// Watchdog reclaim: free every S_EXEC slot whose TX-confirm never came back
+	// within `timeout_ticks` (an unreachable/dead device whose confirm never
+	// fires would otherwise leak the slot forever — see the apsde-slot-leak
+	// note). Copies the abandoned cmds into `out` and frees the slots UNDER the
+	// lock; the caller sends the host failures AFTER releasing it (report_failed
+	// can block on transport), exactly like resolve_take. Returns the count.
+	static size_t reclaim_stale(uint32_t now_ticks, uint32_t timeout_ticks,
+	                            zb_ncp::cmd_t* out, size_t out_cap) {
+		utils::sem_lock l(request_resolver_mutex());
+		size_t n = 0;
+		for (auto& req:storage()) {
+			if (req.state == request_t::S_EXEC &&
+			    (uint32_t)(now_ticks - req.t_exec) >= timeout_ticks) {
+				if (n < out_cap) out[n++] = req.cmd;
+				req.state = request_t::S_NONE;
+			}
+		}
+		return n;
+	}
 };
 
 template <typename Resp>
@@ -396,7 +417,7 @@ struct zb_ncp::request_cmd_process : public request_cmd_resolver<CmdId,Arg> {
     static void report_failed(const zb_ncp::cmd_t& src_cmd, uint8_t status) {
     	cmd_base<Cmd>::report_failed(src_cmd,status);
     }
-    
+
     static void handle_response(ResolveStrategy::request_t& req,const Resp* resp) {
     	uint8_t outdata[Cmd::resp_buffer_size+sizeof(zb_ncp::cmd_t)];
         zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
@@ -466,6 +487,7 @@ struct zb_ncp::request_cmd_process : public request_cmd_resolver<CmdId,Arg> {
                 // concurrent app-task start_resolve override scan.
                 utils::sem_lock l(request_resolver_mutex());
                 req.tsn = r;
+                req.t_exec = xTaskGetTickCount();
                 req.state = ResolveStrategy::request_t::S_EXEC;
             }
             ESP_LOGD(TAG,"%s::do_request tsn: %d",Cmd::name,int(r));

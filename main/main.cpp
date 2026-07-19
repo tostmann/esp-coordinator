@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "app.h"
 #include "netcfg.h"
+#include "coordid.h"
 #include "boot_guard.h"
 #include "sdkconfig.h"
 #include "driver/gpio.h"
@@ -35,6 +36,20 @@ static void handle_pending_erase(void)
         const esp_partition_t* zb = esp_partition_find_first(
             ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "zb_storage");
         if (zb) esp_partition_erase_range(zb, 0, zb->size);
+    }
+    if (options == 1) {
+        // Feature 1: options==1 erases only zb_storage; the coordid "formed"
+        // marker in the nvs partition would survive and later mis-fire the
+        // silent-wipe alarm on the next factory-blank boot, even though THIS
+        // reset was intentional. Drop the marker. (options==2 erases the whole
+        // nvs partition below, taking the coordid namespace with it — no action
+        // needed there.) NVS is not yet initialized here (app::init runs later),
+        // so bring it up just to clear, then deinit to leave the existing
+        // ordering intact for app::init's own nvs_flash_init().
+        if (nvs_flash_init() == ESP_OK) {
+            coordid_clear();
+            nvs_flash_deinit();
+        }
     }
     if (options == 2) {
         // wifi-coex: a factory reset must NOT deprovision the WiFi STA creds.
@@ -167,6 +182,12 @@ void cancel()
 
 }  // namespace boot_guard
 
+// The XIAO RF-antenna-switch handling below is ESP32-C6-only. Both branches
+// drive GPIO3 and GPIO14, and on the ESP32-C5 GPIO14 is USB_D+ — reconfiguring
+// it as a GPIO disables the USB-Serial/JTAG controller that carries the NCP
+// link (and the flash path). On the C5 these pins are therefore left untouched
+// in their reset state, so USB stays alive.
+#if CONFIG_IDF_TARGET_ESP32C6
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
 // Seeed XIAO ESP32-C6 RF antenna switch (pins NOT on the module header):
 // GPIO3 low enables the switch control, GPIO14 selects the antenna
@@ -206,6 +227,7 @@ static void rf_switch_default_input(void)
     gpio_config(&io);
 }
 #endif
+#endif  // CONFIG_IDF_TARGET_ESP32C6
 
 extern "C" void app_main(void)
 {
@@ -218,11 +240,13 @@ extern "C" void app_main(void)
 
     boot_guard::init();
     handle_pending_erase();
+#if CONFIG_IDF_TARGET_ESP32C6
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
     select_external_antenna();
 #else
     rf_switch_default_input();
 #endif
+#endif  // CONFIG_IDF_TARGET_ESP32C6
     ESP_ERROR_CHECK(app::init());
     ESP_ERROR_CHECK(app::start());
 }

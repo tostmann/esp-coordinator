@@ -45,6 +45,13 @@ private:
 
 	uint32_t m_channels_mask;
 	static void continue_zboss(uint8_t );
+	// Feature 1+2: read the live network identity (PAN/extPAN/channel/joined)
+	// and publish it to the coord_health cache (HTTP page) + the coordid NVS
+	// marker (silent-wipe detection). MUST be called ONLY from a ZBOSS-lock-safe
+	// context (zboss_signal_handler DEVICE_REBOOT/FORMATION success) — it calls
+	// zb_get_* getters. formed_hint=true persists the marker + clears
+	// g_network_lost (a healthy resume un-latches the alarm).
+	static void publish_identity_from_zboss(bool formed_hint);
 	static void set_channel_mask(uint32_t mask);
 	static void ncp_zb_task(void* arg);
 
@@ -72,6 +79,10 @@ public:
 	static void on_rx_data(const void* data,size_t size);
 	static void indication(command_id_t cmd,const void* data,size_t size);
 	static void send_cmd_data(const void* data,size_t size);
+	// Periodic watchdog (driven from the app event pump): reclaims APSDE_DATA_REQ
+	// slots whose TX-confirm never returned, so a permanently-offline polled
+	// device can't saturate the shared 16-slot table into network-wide stalls.
+	static void request_watchdog_tick();
 
 	// Free the GET_NETWORK_BACKUP RAM snapshot (40 KB) if one is resident —
 	// called via app's EVENT_TCP_DISCONNECT so an aborted pull from a

@@ -188,8 +188,10 @@ esp_err_t app::start_int() {
         if (res != ESP_OK)
             return res;
 
-        // Boot framing ACK for the SERIAL interfaces (USB/UART NCP hosts stay
-        // available in Mode B next to TCP — master parity, andryblack#11): at
+        // Boot framing ACK for the SERIAL interfaces (UART NCP hosts stay
+        // available in Mode B next to TCP; USB serves NCP only in safe mode —
+        // normal Mode B dedicates it to Improv via disable_usb_ncp above,
+        // andryblack#11): at
         // this point m_active is IFACE_NONE, so the frame is offered to every
         // serial interface non-blockingly. TCP clients don't need it here —
         // they connect later and get it re-emitted on each accept
@@ -268,18 +270,19 @@ esp_err_t app::start_int() {
 
 	ctx_t ctx;
     while (true) {
-        if (xQueueReceive(m_queue, &ctx, portMAX_DELAY) != pdTRUE) {
-            continue;
+        // Bounded wait so the request watchdog runs even on an idle link; on a
+        // busy link it runs after each event (self-rate-limited internally).
+        if (xQueueReceive(m_queue, &ctx, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            if (process_event(ctx) != ESP_OK) {
+                // Per-event failure must not tear down the NCP link — a transient
+                // stream-buffer or oversize-packet error on one ctx is independent
+                // of the next. Pre-fix this loop would `break`, returning to
+                // app_main which then ended the main task and left the host with
+                // an open serial port that never answered again.
+                ESP_LOGE(TAG, "Process event fail");
+            }
         }
-
-        if (process_event(ctx) != ESP_OK) {
-            // Per-event failure must not tear down the NCP link — a transient
-            // stream-buffer or oversize-packet error on one ctx is independent
-            // of the next. Pre-fix this loop would `break`, returning to
-            // app_main which then ended the main task and left the host with
-            // an open serial port that never answered again.
-            ESP_LOGE(TAG, "Process event fail");
-        }
+        zb_ncp::request_watchdog_tick();
     }
 	return ESP_OK;
 }

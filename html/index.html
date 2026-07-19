@@ -300,7 +300,7 @@
             <h1>ESP-Coordinator (ZBOSS NCP)</h1>
             <div style="font-size: 14px; color: #64748b;">
                 <strong>Version:</strong> <span id="firmware-version">loading…</span><br>
-                <strong>Hardware:</strong> ESP32-C6<br>
+                <strong>Hardware:</strong> ESP32-C6 / ESP32-C5 / ESP32-H2<br>
                 <strong>Purpose:</strong> Zigbee Coordinator firmware for Z2M<br>
                 <strong>Source:</strong> <a href="https://github.com/tostmann/esp-coordinator" target="_blank" style="color: var(--primary); text-decoration: none;">GitHub Repository</a><br>
                 <strong>Support:</strong> if this firmware is useful to you, consider a donation &mdash; <a href="https://paypal.me/busware" target="_blank" style="color: var(--primary); text-decoration: none;">paypal.me/busware</a> &#9749;
@@ -310,8 +310,13 @@
 
     <div class="info-box">
         <strong>Information:</strong>
-        This tool flashes the latest factory firmware (version shown above) directly via your browser onto your ESP32-C6.
-        The process automatically verifies that the connected device is an <b>ESP32-C6</b>.
+        This tool flashes the latest factory firmware (version shown above) directly via your browser onto your ESP32-C6, ESP32-C5 or ESP32-H2.
+        The flasher auto-detects the chip and serves the matching image; it verifies that the connected device is a supported chip (<b>ESP32-C6</b>, <b>ESP32-C5</b> or <b>ESP32-H2</b>).
+    </div>
+
+    <div class="info-box" style="background:#fffbeb; border-left-color:#d97706;">
+        🧪 <strong>Experimental — coordinator on WiFi instead of USB:</strong>
+        try the <a href="coex/" style="color:#b45309; font-weight:bold;">native WiFi-Coex build</a> (<b>ESP32-C6 only</b>) — the ESP32-C6 joins your WiFi itself and serves the NCP over TCP (no USB host, no ser2net/socat bridge). It's a testground build; feedback welcome on <a href="https://github.com/tostmann/esp-coordinator/discussions/1" target="_blank" style="color:#b45309;">Discussion #1</a>. <span style="color:#92400e;">(The C5's dual-band WiFi does not help coexistence — one 1T1R radio, time-shared; the C5 is supported for the USB/UART build above. The ESP32-H2 has no WiFi at all, so it is USB/UART only.)</span>
     </div>
 
     <details class="release-notes" id="release-notes">
@@ -324,7 +329,7 @@
         <h3 style="margin-top:0;">1. Connect your device via USB</h3>
         <p style="font-size: 14px; color: #475569;">Click the button below, select your serial port (e.g., USB JTAG/serial debug unit) and start the flash process.</p>
         
-        <!-- The manifest.json enforces chipFamily = "ESP32-C6" -->
+        <!-- manifest.json offers three builds: chipFamily "ESP32-C6" + "ESP32-C5" + "ESP32-H2"; esp-web-tools picks by detected chip -->
         <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
         <div style="margin-top: 10px; font-size: 12px; color: #94a3b8;">
             Supported browsers: Chrome, Edge, Opera. (Safari/Firefox do not fully support WebSerial yet).
@@ -415,7 +420,7 @@ advanced:
 <div id="reboot-modal">
     <div class="reboot-modal-card">
         <h3 id="reboot-modal-title">Chip is rebooting…</h3>
-        <p id="reboot-modal-msg">Waiting for the ESP32-C6 to re-enumerate over USB.</p>
+        <p id="reboot-modal-msg">Waiting for the device to re-enumerate over USB.</p>
         <div class="reboot-spinner" id="reboot-modal-spinner"></div>
         <div id="reboot-modal-countdown">…</div>
         <div id="reboot-modal-button-wrap" style="display: none; margin-top: 8px;">

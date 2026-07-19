@@ -121,6 +121,12 @@ public:
 	// reconnecting for the boot-ready frame.
 	static void close_tcp_client();
 
+	// True while TCP is the active NCP route (the last qualified host bytes
+	// arrived over TCP). Lets command-layer session logic key its "the TCP
+	// client vanished" cleanup to sessions TCP actually carries — a zombie
+	// TCP client dying must not abort a restore streaming over UART
+	// (merge-review finding, 2026-07-19).
+	static bool tcp_route_active() { return instance().m_active.load() == IFACE_TCP; }
 
 	static esp_err_t send(const void* data,size_t size) { return instance().send_int(data,size); }
 

@@ -1,6 +1,6 @@
 {
   "name": "ESP-Coordinator WiFi-Coex (experimental)",
-  "version": "v1.3.62-coex",
+  "version": "v1.5.75-coex",
   "funding_url": "https://paypal.me/busware",
   "new_install_prompt_erase": true,
   "builds": [

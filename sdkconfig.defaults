@@ -1,7 +1,10 @@
 # This file was generated using idf.py save-defconfig. It can be edited manually.
 # Espressif IoT Development Framework (ESP-IDF) 5.3.1 Project Minimal Configuration
 #
-CONFIG_IDF_TARGET="esp32c6"
+# Target is intentionally NOT pinned here, so this single defconfig serves
+# every supported SoC (esp32c6 + esp32c5). Always select the target explicitly
+# with `idf.py set-target esp32c6|esp32c5` before the first build (the build
+# wrapper / CI does this).
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 CONFIG_PARTITION_TABLE_CUSTOM=y

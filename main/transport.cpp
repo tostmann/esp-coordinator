@@ -4,6 +4,7 @@
 #include "utils.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include "sdkconfig.h"
 
 #include <driver/usb_serial_jtag.h>
@@ -506,6 +507,22 @@ esp_err_t transport::start_int() {
 	return ESP_OK;
 }
 
+// Feature 3 helper: scan a freshly-arrived chunk from a PENDING (not-yet-active)
+// TCP client for the start of a ZBOSS-NCP frame (DE AD), so the client only
+// PREEMPTS the active one once it proves it is a real host — a bare connect
+// (port scan / monitor) never qualifies. `pending_de` carries the matcher across
+// chunk boundaries (chunk ended in 0xDE). Returns: the index of the 0xDE if the
+// DE AD is wholly inside this chunk; -1 if it completed via the carry (this chunk
+// starts with 0xAD, the 0xDE was in the previous chunk); -2 if not seen yet.
+static int scan_dead(const uint8_t* buf, int len, bool& pending_de) {
+    if (pending_de && len > 0 && buf[0] == 0xAD) { pending_de = false; return -1; }
+    for (int i = 0; i + 1 < len; ++i) {
+        if (buf[i] == 0xDE && buf[i + 1] == 0xAD) { pending_de = false; return i; }
+    }
+    pending_de = (len > 0 && buf[len - 1] == 0xDE);
+    return -2;
+}
+
 // wifi-coex Mode B host link: a single-client raw TCP server carrying the same
 // DEAD-framed NCP stream the serial backends carry. Host-bound writes go
 // through write_int (IFACE_TCP routing); host->NCP bytes are fed through the
@@ -609,11 +626,129 @@ void transport::tcp_task_int() {
 		}
 		ESP_LOGI(TAG, "NCP client connected");
 
+		int     nb            = -1;     // pending (unqualified) secondary client
+		bool    nb_pending_de = false;  // its DE-AD signature-matcher carry
+		int64_t nb_since_us   = 0;      // accept time (unqualified-drop timeout)
+
+		// Feature 3: full teardown of the ACTIVE client `cs` — close under the
+		// fd lock, demote the TX route, free the session's 40 KB backup snapshot.
+		// Callable mid-session so a preemption can swap clients without breaking
+		// the accept loop (the loop-exit teardown below handles the final one).
+		auto teardown_active = [&]() {
+			{
+				utils::sem_lock l(m_tcp_fd_sem);
+				m_tcp_sock = -1;
+				::close(cs);
+			}
+			ESP_LOGW(TAG, "NCP client disconnected");
+			uint8_t expected = IFACE_TCP;
+			m_active.compare_exchange_strong(expected, IFACE_NONE,
+			                                 std::memory_order_relaxed,
+			                                 std::memory_order_relaxed);
+			app::ctx_t ev = { .event = app::EVENT_TCP_DISCONNECT, .size = 0 };
+			app::send_event(ev);
+		};
+
+		// Qualification-gated single-client server with new-client preemption:
+		// a SECOND connection is accepted into a PENDING slot and given the boot
+		// frames, but only PREEMPTS the active client once it sends a valid DE-AD
+		// frame (scan_dead). A bare TCP connect (port scan / monitor) thus can
+		// never kill a live z2m session, while a genuinely reconnecting host wins
+		// immediately instead of waiting out the ~24 s keepalive on a half-open
+		// zombie that holds the single slot.
 		while (true) {
-			int r = ::recv(cs, m_tcp_temp_buf, BUF_SIZE, 0);
-			if (r <= 0) break;   // peer closed, error, or close_tcp_client()'s FIN
-			rx_qualified_pump(IFACE_TCP, m_tcp_pending_de, m_tcp_temp_buf, r);
+			fd_set rfds;
+			FD_ZERO(&rfds);
+			FD_SET(cs, &rfds);
+			int maxfd = cs;
+			if (nb >= 0) {
+				FD_SET(nb, &rfds);
+				if (nb > maxfd) maxfd = nb;
+			} else {
+				FD_SET(m_listen_sock, &rfds);
+				if (m_listen_sock > maxfd) maxfd = m_listen_sock;
+			}
+			struct timeval tv = {};
+			tv.tv_sec = 1;
+			int s = ::select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+			if (s < 0) { if (errno == EINTR) continue; break; }
+
+			// Drop a pending client that never qualifies (a real host sends a
+			// frame within ms): keeps a silent bare-connect from indefinitely
+			// occupying the pending slot and blocking a later genuine reconnect.
+			if (nb >= 0 && (esp_timer_get_time() - nb_since_us) > 10LL * 1000 * 1000) {
+				ESP_LOGW(TAG, "pending NCP client silent >10s -- dropping");
+				::close(nb); nb = -1; nb_pending_de = false;
+			}
+
+			// (a) New connection while none pending -> accept into the pending
+			//     slot + hand it the boot frames, but do NOT publish it as the
+			//     active client (m_tcp_sock) until it qualifies.
+			if (nb < 0 && FD_ISSET(m_listen_sock, &rfds)) {
+				struct sockaddr_in c2 = {};
+				socklen_t l2 = sizeof(c2);
+				int a = ::accept(m_listen_sock, reinterpret_cast<struct sockaddr*>(&c2), &l2);
+				if (a >= 0) {
+					int one = 1;
+					setsockopt(a, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+					setsockopt(a, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+					int ki = 15, kv = 3, kc = 3;
+					setsockopt(a, IPPROTO_TCP, TCP_KEEPIDLE, &ki, sizeof(ki));
+					setsockopt(a, IPPROTO_TCP, TCP_KEEPINTVL, &kv, sizeof(kv));
+					setsockopt(a, IPPROTO_TCP, TCP_KEEPCNT, &kc, sizeof(kc));
+					struct timeval st = {};
+					st.tv_sec = 8;
+					setsockopt(a, SOL_SOCKET, SO_SNDTIMEO, &st, sizeof(st));
+					::send(a, boot_ack, sizeof(boot_ack), 0);
+					::send(a, ncp_reset_ready, sizeof(ncp_reset_ready), 0);
+					nb = a; nb_pending_de = false; nb_since_us = esp_timer_get_time();
+					ESP_LOGI(TAG, "second NCP client pending (awaiting DE-AD to preempt)");
+				}
+			}
+
+			// (b) Pending client sent data -> qualify on DE-AD, else keep waiting.
+			if (nb >= 0 && FD_ISSET(nb, &rfds)) {
+				int r = ::recv(nb, m_tcp_temp_buf, BUF_SIZE, 0);
+				if (r <= 0) {
+					::close(nb); nb = -1; nb_pending_de = false;   // gave up
+				} else {
+					int hit = scan_dead(m_tcp_temp_buf, r, nb_pending_de);
+					if (hit != -2) {
+						ESP_LOGW(TAG, "pending NCP client qualified -- preempting active client");
+						int promoted = nb; nb = -1;
+						teardown_active();
+						cs = promoted;
+						// hit==-1: the 0xDE was in the previous (discarded) chunk;
+						// tell rx_qualified_pump a 0xDE preceded so it re-injects
+						// it. Otherwise the DE-AD is in this buffer and it re-finds.
+						m_tcp_pending_de = (hit == -1);
+						{ utils::sem_lock l(m_tcp_fd_sem); m_tcp_sock = cs; }
+						rx_qualified_pump(IFACE_TCP, m_tcp_pending_de, m_tcp_temp_buf, r);
+						continue;
+					}
+				}
+			}
+
+			// (c) Active client traffic (normal path, behaviour unchanged).
+			if (FD_ISSET(cs, &rfds)) {
+				int r = ::recv(cs, m_tcp_temp_buf, BUF_SIZE, 0);
+				if (r <= 0) {
+					// Active client gone. Promote a waiting pending client
+					// (unqualified) so the session continues — it qualifies later
+					// on its own DE-AD — instead of dropping it to the backlog.
+					if (nb >= 0) {
+						teardown_active();
+						cs = nb; nb = -1;
+						m_tcp_pending_de = nb_pending_de;
+						{ utils::sem_lock l(m_tcp_fd_sem); m_tcp_sock = cs; }
+						continue;
+					}
+					break;
+				}
+				rx_qualified_pump(IFACE_TCP, m_tcp_pending_de, m_tcp_temp_buf, r);
+			}
 		}
+		if (nb >= 0) { ::close(nb); nb = -1; }
 
 		// Teardown under m_tcp_fd_sem: write_int may be mid-send on this fd
 		// (bounded by the per-frame deadline) — closing under the lock means

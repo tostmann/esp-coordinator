@@ -7,9 +7,12 @@
 #include "transport.h"
 #include "wifi_coex.h"
 #include "backup_structured.h"
+#include "coordid.h"
+#include "coord_health.h"
 #include "nwk/esp_zigbee_nwk.h"
 #include "esp_zigbee_secur.h"
 #include <nvs.h>
+#include <cstring>
 // NOTE: deliberately NOT including esp_zigbee_core.h — referencing any of its
 // symbols (e.g. esp_zb_set_primary_network_channel_set) pulls in
 // esp_zigbee_core.c.obj from libesp_zb_api.zczr.a, which redefines our own
@@ -489,6 +492,34 @@ static zb_uint8_t data_indication(zb_bufid_t param) {
   return ZB_TRUE;
 }
 
+// Watchdog timeout: comfortably beyond any legitimate APS confirm (host request
+// timeouts are ~10 s; APS ack retries + sleepy indirect delivery resolve well
+// under that), so we only ever reclaim slots whose confirm is genuinely lost.
+static constexpr uint32_t APSDE_WATCHDOG_TIMEOUT_MS = 20000;
+
+void zb_ncp::request_watchdog_tick() {
+    // Rate-limit to ~2 s regardless of how often the pump calls us (a busy
+    // queue would otherwise contend the resolver mutex per event). The static
+    // is app-task-only (the pump), so unraced.
+    static uint32_t s_last = 0;
+    uint32_t now = xTaskGetTickCount();
+    if ((uint32_t)(now - s_last) < pdMS_TO_TICKS(2000)) return;
+    s_last = now;
+    using Cmd = cmd_handle<APSDE_DATA_REQ>;
+    cmd_t stale[MAX_PARALLEL_REQUESTS];
+    size_t n = Cmd::reclaim_stale(now, pdMS_TO_TICKS(APSDE_WATCHDOG_TIMEOUT_MS),
+                                  stale, MAX_PARALLEL_REQUESTS);
+    // FREE-ONLY: we reclaim the leaked slot (the whole point — keep the shared
+    // table from saturating) but deliberately do NOT send the host a failure.
+    // The host (herdsman) times its APSDE waitress out at ~10 s, long before our
+    // 20 s reclaim, and reuses the 8-bit NCP tsn for later requests — a late
+    // response here could false-match one of those. Silent reclaim is strictly
+    // safer and loses nothing (the host already gave up and retries on its own).
+    for (size_t i = 0; i < n; ++i) {
+        ESP_LOGW(TAG, "APSDE watchdog: reclaimed stale request tsn=%d", int(stale[i].tsn));
+    }
+}
+
 void zb_ncp::send_boot_ready_frame() {
     static const uint8_t boot_ready_frame[] = {
         0xDE, 0xAD,             // signature
@@ -583,6 +614,34 @@ void zb_ncp::continue_zboss(uint8_t arg) {
 }
 
 
+// Feature 1+2: read the live identity once and publish it to both surfaces.
+// Lock-safe context only (ZBOSS scheduler callback) — calls zb_get_* getters.
+void zb_ncp::publish_identity_from_zboss(bool formed_hint)
+{
+    bool     joined = zb_zdo_joined();
+    uint16_t pan    = zb_get_pan_id();
+    uint8_t  chan   = zb_get_current_channel();
+    uint8_t  ext[8];
+    zb_get_extended_pan_id(ext);
+
+    // F2: live HTTP-health cache (pure data setter, no zb_* inside).
+    coord_health_publish(joined, pan, chan, ext);
+
+    // F1: persist the "we are formed" marker so a later factory-blank boot can
+    // be recognised as a silent wipe. Guard on a real PAN so we never persist a
+    // blank stack as "formed". A healthy resume un-latches any prior alarm.
+    if (formed_hint && pan != 0xFFFF) {
+        coord_identity_t id{};
+        id.ver     = 1;
+        id.formed  = 1;
+        id.pan     = pan;
+        id.channel = chan;
+        memcpy(id.extpan, ext, sizeof(id.extpan));
+        coordid_save(&id);
+        g_network_lost = false;
+    }
+}
+
 extern "C" void zboss_signal_handler(zb_uint8_t param)
 {
     zb_zdo_app_signal_hdr_t *sg_p = NULL;
@@ -604,22 +663,56 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
         
         
         break;
-    case ZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case ZB_BDB_SIGNAL_DEVICE_REBOOT:
+        // Resumed an existing network from NVRAM. Refresh the identity marker +
+        // HTTP-health cache (F1/F2) and un-latch any silent-wipe alarm.
         if (success) {
+            zb_ncp::publish_identity_from_zboss(/*formed=*/true);
             ESP_LOGI(TAG, "Device reboot complete");
             //zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_NETWORK_FORMATION);
         } else {
             ESP_LOGE(TAG, "Failed to initialize Zigbee stack (status: %d)", status);
-
         }
         zb_ncp::cmd_handle<NWK_START_WITHOUT_FORMATION>::response(success ? 0 : 1);
-
         break;
+    case ZB_BDB_SIGNAL_DEVICE_FIRST_START: {
+        // Factory-blank stack THIS boot. Feature 1: if a "formed" marker
+        // survives in NVS, the ZBOSS NVRAM was silently wiped (interrupted
+        // write) or a poison backup was restored -> the user's network vanished.
+        // Surface it (g_network_lost + ESP_LOGE) instead of silently sitting
+        // empty. NO zb_get_* here: the stack is blank (0xFFFF/0xFF), we rely
+        // only on the persisted marker. Bench-proven 2026-06-19 (Disc#1/peca89).
+        if (success) {
+            coord_identity_t prev{};
+            if (coordid_load(&prev) && prev.formed) {
+                g_network_lost = true;
+                coord_health_mark_lost(prev.pan, prev.channel);
+                ESP_LOGE(TAG, "NETWORK LOST: stack came up factory-blank but marker "
+                              "shows prior PAN 0x%04x ch %u -- NVRAM wiped or poison restore",
+                         prev.pan, prev.channel);
+            } else {
+                ESP_LOGI(TAG, "first start (genuine factory-new, no prior marker)");
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize Zigbee stack (status: %d)", status);
+        }
+        // F2: publish a blank identity so the HTTP page shows "Joined: no"
+        // rather than "(starting)". Pure data, no zb_* call on the blank stack.
+        const uint8_t zext[8] = {0};
+        coord_health_publish(/*joined=*/false, /*pan=*/0xFFFF, /*channel=*/0xFF, zext);
+        zb_ncp::cmd_handle<NWK_START_WITHOUT_FORMATION>::response(success ? 0 : 1);
+        break;
+    }
     case ZB_ZDO_SIGNAL_DEVICE_ANNCE: {
         ESP_LOGD(TAG,"ZB_ZDO_SIGNAL_DEVICE_ANNCE");
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_device_annce_params_t);
-        zb_ncp::indication(ZDO_DEV_ANNCE_IND,parameters,sizeof(zb_zdo_signal_device_annce_params_t));
+        // NCP spec 3.5.3.12: [nwk(2)|ieee(8)|capability(1)] = 11 bytes — the raw
+        // struct matches field-wise but carries 1 alignment pad byte; send spec-exact.
+        uint8_t annce[2 + sizeof(zb_ieee_addr_t) + 1];
+        memcpy(annce, &parameters->device_short_addr, 2);
+        memcpy(annce + 2, parameters->ieee_addr, sizeof(zb_ieee_addr_t));
+        annce[10] = parameters->capability;
+        zb_ncp::indication(ZDO_DEV_ANNCE_IND,annce,sizeof(annce));
     } break;
     case ZB_ZDO_SIGNAL_LEAVE: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_leave_params_t);
@@ -632,7 +725,13 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
     case ZB_ZDO_SIGNAL_LEAVE_INDICATION: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_signal_leave_indication_params_t);
         ESP_LOGD(TAG,"ZB_ZDO_SIGNAL_LEAVE_INDICATION");
-        zb_ncp::indication(NWK_LEAVE_IND,parameters,sizeof(zb_zdo_signal_leave_indication_params_t));
+        // NCP spec 3.5.5.10: payload is [ieee(8)|rejoin(1)] — the ZBOSS signal
+        // struct carries a leading short_addr the host must not see (hosts would
+        // misparse short++ieee[0:6] as the IEEE address).
+        uint8_t payload[sizeof(zb_ieee_addr_t) + 1];
+        memcpy(payload, parameters->device_addr, sizeof(zb_ieee_addr_t));
+        payload[sizeof(zb_ieee_addr_t)] = parameters->rejoin;
+        zb_ncp::indication(NWK_LEAVE_IND,payload,sizeof(payload));
     } break;
     case ZB_ZDO_DEVICE_UNAVAILABLE: {
         auto parameters = ZB_ZDO_SIGNAL_GET_PARAMS(sg_p,const zb_zdo_device_unavailable_params_t);
@@ -645,7 +744,13 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
         ESP_LOGD(TAG,"addr: %04x status: %d parent: %04x",parameters->short_addr,int(parameters->status),parameters->parent_short);
 
     
-        zb_ncp::indication(ZDO_DEV_UPDATE_IND,parameters,sizeof(zb_zdo_signal_device_update_params_t));
+        // NCP spec 3.5.3.20: [ieee(8)|nwk(2)|status(1)] = 11 bytes — the raw struct
+        // additionally carries tc_action + parent_short, which are not in the spec.
+        uint8_t update[sizeof(zb_ieee_addr_t) + 2 + 1];
+        memcpy(update, parameters->long_addr, sizeof(zb_ieee_addr_t));
+        memcpy(update + 8, &parameters->short_addr, 2);
+        update[10] = parameters->status;
+        zb_ncp::indication(ZDO_DEV_UPDATE_IND,update,sizeof(update));
         // {name: 'ieee', type: DataType.IEEE_ADDR},
         // {name: 'nwk', type: DataType.UINT16},
         // {name: 'status', type: DataType.UINT8, typed: DeviceUpdateStatus},
@@ -679,6 +784,8 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
             // network is operational; whether/when to open it is the host's
             // decision via NWK_PERMIT_JOINING. Also covers the
             // restore-forced formation path (s_restore_applied).
+            // F1/F2: persist the freshly-formed identity marker + health cache.
+            zb_ncp::publish_identity_from_zboss(/*formed=*/true);
             ESP_LOGI(TAG, "Formed network successfully");
         }
 

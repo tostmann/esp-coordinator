@@ -1,13 +1,18 @@
 #include "web_info.h"
 #include "wifi_coex.h"
+#include "coordid.h"        // g_network_lost (Feature 1)
+#include "coord_health.h"   // live identity cache (Feature 2)
+#include "version.h"        // FW_VERSION_STRING
 
 #include <lwip/sockets.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_log.h>
+#include <esp_system.h>     // esp_reset_reason
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 static const char *TAG = "WEBINFO";
 
@@ -35,10 +40,15 @@ static const char PAGE[] = R"HTML(<!DOCTYPE html>
  .note{background:#f0f9ff;border-left:4px solid #0ea5e9;border-radius:4px;padding:10px 14px;font-size:13px;margin-top:14px}
  .warn{background:#fef2f2;border-left:4px solid #ef4444;border-radius:4px;padding:10px 14px;font-size:13px;color:#991b1b;margin-top:14px}
  a{color:#2563eb}.small{font-size:12px;color:#94a3b8;margin-top:22px}
+ .st{border-collapse:collapse;margin:6px 0 4px;font-size:14px}
+ .st td{padding:4px 16px 4px 0;border-bottom:1px solid #eef2f6}
+ .st td:first-child{color:#64748b;white-space:nowrap}
 </style></head><body><div class="card">
 <div class="hd"><img src="busware.png" alt="busware">
 <div><h1><span class="ok">&#10003;</span> Coordinator connected</h1>
 <div style="color:#64748b;font-size:14px">Your ESP-Coordinator (ZBOSS NCP) is on your WiFi. &middot; <a href="https://github.com/tostmann/esp-coordinator" target="_blank">GitHub</a></div></div></div>
+
+@STATUS@
 
 <div class="exp"><strong>Experimental WiFi-Coex build.</strong> The single C6 radio is time-shared between WiFi and Zigbee; coexistence quality depends on your RF environment. Use a spare stick / test network and please report back (link below).</div>
 
@@ -69,7 +79,8 @@ It carries the longer timeouts the single-radio TCP link needs; the stock image 
 <div class="small"><a href="https://github.com/tostmann/esp-coordinator" target="_blank">GitHub</a> &middot; <a href="https://paypal.me/busware" target="_blank">Support &#9749;</a> &middot; experimental wifi-coex build</div>
 </div></body></html>)HTML";
 
-static const char HOST_TOKEN[] = "@HOST@";
+static const char HOST_TOKEN[]   = "@HOST@";
+static const char STATUS_TOKEN[] = "@STATUS@";
 
 static void send_all(int cs, const char *p, int len) {
     int off = 0;
@@ -80,34 +91,115 @@ static void send_all(int cs, const char *p, int len) {
     }
 }
 
-// Serve the HTML page with @HOST@ substituted by the device's real IP.
+// Render the live coordinator-status block (Feature 2). READ-ONLY: the
+// g_coord_health cache (published from the ZBOSS task), g_network_lost
+// (Feature 1), esp_reset_reason(), FW_VERSION_STRING, and the WiFi RSSI getter.
+// CRITICAL: NO zb_* calls here — this runs on the httpd task and a zb_* call
+// would reintroduce the v1.3.49 cross-task big-lock vPortExitCritical panic.
+static void build_status_html(char *o, size_t n) {
+    const struct coord_health &h = g_coord_health;
+    int w = 0;
+#define WREM ((w < (int)n) ? (size_t)((int)n - w) : (size_t)0)
+    if (g_network_lost) {
+        w += snprintf(o + w, WREM,
+            "<div class=\"warn\" style=\"border-left-width:6px;font-size:14px\">"
+            "<b>&#9888; NETWORK LOST &mdash; your Zigbee network is gone.</b> "
+            "The coordinator booted factory-blank: its NVRAM was wiped (an "
+            "interrupted write) or a corrupt backup was restored. Last known "
+            "network: PAN 0x%04X, channel %u. Recover by letting Zigbee2MQTT "
+            "form a fresh network and re-pairing your devices, or by restoring "
+            "a known-good backup.</div>",
+            (unsigned)h.lost_pan, (unsigned)h.lost_channel);
+    }
+
+    const char *joined_s = !h.valid ? "(starting&hellip;)" : (h.joined ? "yes" : "no");
+    char panbuf[12], chanbuf[12], extbuf[28];
+    if (h.valid && h.joined) {
+        snprintf(panbuf, sizeof panbuf, "0x%04X", (unsigned)h.pan);
+        snprintf(chanbuf, sizeof chanbuf, "%u", (unsigned)h.channel);
+        uint8_t e[8];
+        if (coord_health_read_extpan(e))
+            snprintf(extbuf, sizeof extbuf,
+                     "%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                     e[7], e[6], e[5], e[4], e[3], e[2], e[1], e[0]);  // MSB-first display
+        else
+            strcpy(extbuf, "&mdash;");
+    } else {
+        strcpy(panbuf, "&mdash;");
+        strcpy(chanbuf, "&mdash;");
+        strcpy(extbuf, "&mdash;");
+    }
+
+    w += snprintf(o + w, WREM,
+        "<h2>Coordinator status</h2><table class=\"st\">"
+        "<tr><td>Joined</td><td>%s</td></tr>"
+        "<tr><td>PAN ID</td><td>%s</td></tr>"
+        "<tr><td>Channel</td><td>%s</td></tr>"
+        "<tr><td>Ext&nbsp;PAN / IEEE</td><td><code>%s</code></td></tr>"
+        "<tr><td>Firmware</td><td>%s</td></tr>"
+        "<tr><td>Reset&nbsp;reason</td><td>%d</td></tr>",
+        joined_s, panbuf, chanbuf, extbuf, FW_VERSION_STRING, (int)esp_reset_reason());
+
+    int8_t rssi;
+    if (wifi_coex_current_rssi(&rssi))
+        w += snprintf(o + w, WREM,
+            "<tr><td>WiFi&nbsp;RSSI</td><td>%d&nbsp;dBm</td></tr>", (int)rssi);
+    w += snprintf(o + w, WREM, "</table>");
+#undef WREM
+}
+
+// Serve the HTML page with @HOST@ -> device IP and @STATUS@ -> live status block.
+// The status block is variable-length (banner present/absent, joined/blank,
+// RSSI present/absent), so the body is assembled into ONE heap buffer and the
+// Content-Length is its exact strlen (an over-count hangs the browser, an
+// under-count truncates). Heap, not stack: the webinfo task stack is only 3584 B.
 static void send_html(int cs) {
     char ip[20] = {0};
     wifi_coex_current_ip(ip, sizeof(ip));
     if (!ip[0]) strncpy(ip, "this-device", sizeof(ip) - 1);
     const int iplen = (int)strlen(ip);
-    const int toklen = (int)(sizeof(HOST_TOKEN) - 1);
 
-    // Exact Content-Length after substitution (a browser relies on it; an over-
-    // count makes it hang waiting for bytes, an under-count truncates).
-    int ntok = 0;
-    for (const char *q = PAGE; (q = strstr(q, HOST_TOKEN)); q += toklen) ++ntok;
-    const int body_len = (int)(sizeof(PAGE) - 1) - ntok * toklen + ntok * iplen;
+    // static (BSS), NOT on the stack: the webinfo task stack is small and a 1.5 KB
+    // stack buffer here (on top of serve_client's req[700]) overflows it. The task
+    // serves one client at a time (synchronous accept loop), so a static scratch
+    // buffer is reentrancy-safe.
+    static char status[1536];
+    build_status_html(status, sizeof(status));
+    const int statuslen = (int)strlen(status);
+
+    const int hosttok = (int)(sizeof(HOST_TOKEN) - 1);
+    const int stattok = (int)(sizeof(STATUS_TOKEN) - 1);
+
+    const size_t cap = sizeof(PAGE) + (size_t)statuslen + 64;
+    char *body = (char *)malloc(cap);
+    if (!body) {
+        static const char busy[] =
+            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+            "Content-Length: 11\r\n\r\nbusy, retry";
+        send_all(cs, busy, (int)(sizeof(busy) - 1));
+        return;
+    }
+    size_t bl = 0;
+    for (const char *p = PAGE; *p && bl + 1 < cap; ) {
+        if (!strncmp(p, HOST_TOKEN, hosttok)) {
+            for (int i = 0; i < iplen && bl + 1 < cap; ++i) body[bl++] = ip[i];
+            p += hosttok;
+        } else if (!strncmp(p, STATUS_TOKEN, stattok)) {
+            for (int i = 0; i < statuslen && bl + 1 < cap; ++i) body[bl++] = status[i];
+            p += stattok;
+        } else {
+            body[bl++] = *p++;
+        }
+    }
+    body[bl] = 0;
 
     char hdr[160];
-    int h = snprintf(hdr, sizeof(hdr),
+    int hh = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-        "Content-Length: %d\r\nConnection: close\r\n\r\n", body_len);
-    send_all(cs, hdr, h);
-
-    const char *p = PAGE;
-    while (*p) {
-        const char *t = strstr(p, HOST_TOKEN);
-        if (!t) { send_all(cs, p, (int)strlen(p)); break; }
-        send_all(cs, p, (int)(t - p));
-        send_all(cs, ip, iplen);
-        p = t + toklen;
-    }
+        "Content-Length: %u\r\nConnection: close\r\n\r\n", (unsigned)bl);
+    send_all(cs, hdr, hh);
+    send_all(cs, body, (int)bl);
+    free(body);
 }
 
 static void send_png(int cs) {
@@ -190,7 +282,7 @@ extern "C" void web_info_start(void) {
     static bool started = false;
     if (started) return;
     started = true;
-    if (xTaskCreate(web_info_task, "webinfo", 3584, nullptr, 4, nullptr) != pdPASS) {
+    if (xTaskCreate(web_info_task, "webinfo", 4608, nullptr, 4, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "webinfo task create failed");
         started = false;
     }
