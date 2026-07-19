@@ -180,6 +180,15 @@ Two things worth noting:
 - In #6, after flashing v1.5.73 and re-pairing, battery auto-reports from an
   IKEA blind (E2102) and an open/close remote (E1766) came back — the same
   reporting class as this report.
+- An independent field report matches: in
+  [Koenkk/zigbee2mqtt#32511](https://github.com/Koenkk/zigbee2mqtt/issues/32511)
+  a Shelly BLU H&T ZB (SBHT-203C) battery sensor showed this exact symptom
+  (no automatic reports, manual refresh worked, fine on SmartThings), and the
+  reporter closed the issue on 2026-07-13: *"The issue went away after
+  updating the coordinator in this repository. Sensor data started coming in
+  like in Samsung SmartThings."* That report does not name the firmware
+  version flashed, so it is supporting evidence for this mechanism, not
+  proof.
 
 **Unconfirmed:** whether the specific Aqara / Mijia / Hue devices in *this*
 report hung on this exact mechanism. Some of those vendors have their own
