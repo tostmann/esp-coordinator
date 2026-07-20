@@ -20,6 +20,22 @@
 # Read-only by default. --unbind-phantoms sends one ZDO Unbind_req per phantom
 # entry and re-dumps the table to verify. Exit codes: 0 ok, 1 link/comm error,
 # 2 ZDO error from the device.
+#
+# --test-bind: differential bind probe (issue #7). Sends three Bind_reqs for
+# (--src-ep, --cluster) with three different destination IEEEs:
+#   1. the coordinator's real IEEE   (what a >=v1.5.73 host writes)
+#   2. a neutral test IEEE           (locally administered, owned by nobody)
+#   3. the phantom IEEE              (byte-reversed real - what a <=v1.5.70
+#                                     host wrote, issue #6)
+# and records the ZDO status of each. Every successful bind is unbound again
+# immediately, so the probe leaves no state behind; a final table dump
+# verifies that. This discriminates "device rejects binds depending on the
+# destination IEEE value" from "device rejects all binds right now".
+# A mid-probe dump (between the first successful bind and its unbind) checks
+# whether the device's Mgmt_Bind reporting actually reflects the table.
+# Target 0x0000 (the coordinator itself) skips the mid/final dumps: a
+# self-addressed bind/unbind wedges subsequent self-addressed Mgmt_Bind in the
+# stack until reboot (bench-verified on v1.5.73; remote targets unaffected).
 
 import sys, time, argparse, socket
 
@@ -179,7 +195,7 @@ def parse_records(body):
                          mode=mode, dst=dst, dst_short=dst_short, dst_ep=dst_ep))
     return entries, start, count, recs
 
-def dump_table(port, nwk):
+def dump_table(port, nwk, soft=False):
     all_recs = []
     start = 0
     entries = None
@@ -188,11 +204,15 @@ def dump_table(port, nwk):
         r = txn_retry(port, 0x020F, nwk.to_bytes(2, "little") + bytes([start]), tsn)
         tsn = (tsn + 4) & 0xFF
         if r is None:
+            if soft:
+                return None, []
             print("!! no response to Mgmt_Bind_req — is the device awake/on the network, "
                   "and is Z2M really stopped?")
             sys.exit(1)
         cat, status, body = r
         if status != 0:
+            if soft:
+                return None, []
             print(f"!! Mgmt_Bind_req rejected: ZDO status 0x{status:02x}")
             sys.exit(2)
         entries, got_start, count, recs = parse_records(body)
@@ -211,12 +231,102 @@ def classify(rec, ieee_true, ieee_phantom):
         return "PHANTOM (byte-reversed coordinator)"
     return "other device"
 
+# ---------------------------------------------------------------------------
+# --test-bind: differential bind probe (issue #7)
+# ---------------------------------------------------------------------------
+
+ZDO_STATUS_NAMES = {
+    0x00: "SUCCESS", 0x80: "INV_REQUESTTYPE", 0x84: "NOT_SUPPORTED",
+    0x85: "TIMEOUT", 0x88: "NO_ENTRY", 0x8C: "TABLE_FULL",
+    0x8D: "NOT_AUTHORIZED",
+}
+
+def status_str(r):
+    if r is None:
+        return "NO RESPONSE (timeout)"
+    cat, status, _ = r
+    name = ZDO_STATUS_NAMES.get(status, "?")
+    return f"status 0x{status:02x} {name} (category {cat})"
+
+def resolve_ieee(port, nwk):
+    """Device IEEE via ZDO_IEEE_ADDR_REQ (0x0202); returns LE wire bytes."""
+    payload = (nwk.to_bytes(2, "little") + nwk.to_bytes(2, "little") +
+               bytes([0x00, 0x00]))          # single-device request, index 0
+    r = txn_retry(port, 0x0202, payload, 0x30)
+    if r is None or r[1] != 0 or len(r[2]) < 8:
+        return None
+    return bytes(r[2][0:8])
+
+def bind_payload(nwk, src_ieee, src_ep, cluster, dst_ieee, dst_ep):
+    """Shared wire layout of ZDO_BIND_REQ (0x0208) / ZDO_UNBIND_REQ (0x0209):
+    target(2) srcIeee(8) srcEP(1) cluster(2) addrMode(1)=0x03 dstIeee(8) dstEP(1)."""
+    return (nwk.to_bytes(2, "little") + src_ieee + bytes([src_ep]) +
+            cluster.to_bytes(2, "little") + bytes([0x03]) + dst_ieee +
+            bytes([dst_ep]))
+
+# locally administered EUI-64 (U/L bit set) - guaranteed to belong to nobody
+NEUTRAL_IEEE_LE = bytes(reversed(bytes.fromhex("02deadbeef001234")))
+
+def run_bind_probe(port, nwk, src_ieee, src_ep, cluster, dst_ep,
+                   ieee_true, ieee_phantom):
+    candidates = [
+        ("real coordinator IEEE", ieee_true),
+        ("neutral test IEEE",     NEUTRAL_IEEE_LE),
+        ("phantom IEEE (issue#6)", ieee_phantom),
+    ]
+    print(f"\nbind probe: src {ieee_disp(src_ieee)}/{src_ep}  "
+          f"cluster 0x{cluster:04x}  dst_ep {dst_ep}")
+    results = []
+    leftovers = []
+    # Visibility check: after the FIRST successful bind (before its unbind) the
+    # table must show the fresh entry — if it doesn't, the device's Mgmt_Bind
+    # reporting is proven unreliable. None = check not run. Skipped for the
+    # coordinator itself (nwk 0x0000): a self-addressed bind/unbind wedges the
+    # stack's subsequent self-addressed Mgmt_Bind until reboot (bench-verified
+    # on v1.5.73), so self-probes must not dump mid-sequence.
+    mid_visible = None
+    tsn = 0x60
+    for label, dst in candidates:
+        pl = bind_payload(nwk, src_ieee, src_ep, cluster, dst, dst_ep)
+        r = txn_retry(port, 0x0208, pl, tsn, timeout_s=8.0)
+        tsn = (tsn + 4) & 0xFF
+        bound = r is not None and r[1] == 0
+        line = f"  bind   -> {ieee_disp(dst)}/{dst_ep} ({label}): {status_str(r)}"
+        results.append((label, r))
+        if bound:
+            if mid_visible is None and nwk != 0x0000:
+                _, mrecs = dump_table(port, nwk, soft=True)
+                mid_visible = any(rec["src_ep"] == src_ep and
+                                  rec["cluster"] == cluster and
+                                  rec["dst"] == dst for rec in mrecs)
+            time.sleep(0.3)
+            ru = txn_retry(port, 0x0209, pl, tsn, timeout_s=8.0)
+            tsn = (tsn + 4) & 0xFF
+            if ru is None or ru[1] != 0:
+                leftovers.append((label, dst))
+                line += f"\n  unbind -> FAILED: {status_str(ru)}  ** ENTRY LEFT BEHIND **"
+            else:
+                line += "  [unbound again, clean]"
+        print(line)
+        time.sleep(0.3)
+    return results, leftovers, mid_visible
+
 def main():
     ap = argparse.ArgumentParser(description="Dump/clean a device binding table via an esp-coordinator stick")
     ap.add_argument("port", help="/dev/ttyACM0 | /dev/serial/by-id/... | tcp://IP:6638")
     ap.add_argument("nwk", help="device network address as shown by Z2M, e.g. 0x4711")
     ap.add_argument("--unbind-phantoms", action="store_true",
                     help="send Unbind_req for every phantom entry, then re-dump to verify")
+    ap.add_argument("--test-bind", action="store_true",
+                    help="differential bind probe: bind to real/neutral/phantom "
+                         "IEEE, record the three ZDO statuses, unbind again")
+    ap.add_argument("--cluster", default="0xfcc0",
+                    help="cluster for --test-bind (default 0xfcc0 manuSpecificLumi)")
+    ap.add_argument("--src-ep", default="1", help="device source endpoint (default 1)")
+    ap.add_argument("--dst-ep", default="1", help="destination endpoint (default 1)")
+    ap.add_argument("--src-ieee",
+                    help="device IEEE override as 0x... (default: resolved via "
+                         "ZDO_IEEE_ADDR_REQ)")
     args = ap.parse_args()
     nwk = int(args.nwk, 0)
 
@@ -288,6 +398,49 @@ def main():
         sys.exit(0 if not left and not failed else 2)
     elif args.unbind_phantoms:
         print("\nnothing to unbind — no phantom entries found.")
+
+    # -- optional differential bind probe ------------------------------------
+    if args.test_bind:
+        pre_entries = entries
+        if args.src_ieee:
+            src_ieee = bytes(reversed(bytes.fromhex(args.src_ieee.replace("0x", ""))))
+        else:
+            src_ieee = resolve_ieee(port, nwk)
+            if src_ieee is None:
+                print("\n!! could not resolve the device IEEE (ZDO_IEEE_ADDR_REQ) — "
+                      "pass it explicitly via --src-ieee 0x...")
+                sys.exit(1)
+        results, leftovers, mid_visible = run_bind_probe(
+            port, nwk, src_ieee,
+            int(args.src_ep, 0), int(args.cluster, 0), int(args.dst_ep, 0),
+            ieee_true, ieee_phantom)
+
+        if nwk != 0x0000:
+            entries2, recs2 = dump_table(port, nwk, soft=True)
+            print(f"\nafter probe: table reports "
+                  f"{'?' if entries2 is None else entries2} entries "
+                  f"(was {pre_entries} before)")
+        else:
+            print("\n(final table dump skipped for the coordinator itself — "
+                  "self-addressed Mgmt_Bind wedges after a self bind/unbind "
+                  "until reboot)")
+        if mid_visible is True:
+            print("mid-probe check: fresh bind entry WAS visible via Mgmt_Bind — "
+                  "table reporting looks reliable on this device.")
+        elif mid_visible is False:
+            print("mid-probe check: fresh bind entry NOT visible via Mgmt_Bind — "
+                  "this device's Mgmt_Bind reporting does not reflect its real "
+                  "binding table (known device-firmware quirk); 0-entry dumps "
+                  "from it prove nothing.")
+        if leftovers:
+            print("!! WARNING: probe entries left behind (unbind failed) — "
+                  "re-run, or remove manually:")
+            for label, dst in leftovers:
+                print(f"     {label}: dst {ieee_disp(dst)}")
+        print("\nprobe summary:")
+        for label, r in results:
+            print(f"  {label:24s} {status_str(r)}")
+        sys.exit(2 if leftovers else 0)
 
 if __name__ == "__main__":
     main()
