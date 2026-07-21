@@ -11,7 +11,7 @@
 # against the coordinator's true IEEE, and can unbind the phantom entries.
 #
 # Usage (STOP Zigbee2MQTT / any other host first — the stick has one NCP link):
-#   python3 bind_table_tool.py PORT NWK_ADDR [--unbind-phantoms]
+#   python3 bind_table_tool.py PORT NWK_ADDR [--unbind-phantoms | --test-bind | --purge-phantom-blind]
 #     PORT      serial port (/dev/ttyACM0, /dev/serial/by-id/...) or tcp://IP:6638
 #     NWK_ADDR  the device's network address as shown by Z2M, e.g. 0x4711
 # The device must be awake/mains-powered (a sleepy device needs a button press).
@@ -36,6 +36,17 @@
 # Target 0x0000 (the coordinator itself) skips the mid/final dumps: a
 # self-addressed bind/unbind wedges subsequent self-addressed Mgmt_Bind in the
 # stack until reboot (bench-verified on v1.5.73; remote targets unaffected).
+#
+# --purge-phantom-blind: remove phantom entries WITHOUT relying on Mgmt_Bind
+# (some devices provably under-report their binding table, so --unbind-phantoms
+# never sees them). Sends one ZDO Unbind_req per (src_ep, cluster) combination
+# from a fixed list (default: the binds Z2M's configure writes for the Aqara
+# WS-K07E — override with --purge-list "ep:cluster,ep:cluster,..."), each with
+# dst = the phantom IEEE. Unbind doubles as forensics: SUCCESS = the entry
+# existed and is now removed; NO_ENTRY (0x88) = it was never there. Afterwards
+# a verify bind with the neutral test IEEE (never a real entry, so removing it
+# again cannot touch a live bind) checks whether the table accepts new entries
+# again. Restart Z2M and re-run Configure after a successful purge.
 
 import sys, time, argparse, socket
 
@@ -267,6 +278,14 @@ def bind_payload(nwk, src_ieee, src_ep, cluster, dst_ieee, dst_ep):
 # locally administered EUI-64 (U/L bit set) - guaranteed to belong to nobody
 NEUTRAL_IEEE_LE = bytes(reversed(bytes.fromhex("02deadbeef001234")))
 
+# Default --purge-phantom-blind combination list: every bind Z2M's configure
+# writes for the Aqara WS-K07E (zigbee-herdsman-converters lumi.ts "WS-K07E":
+# bindCluster manuSpecificLumi ep1+ep4, bindCluster genOnOff ep1, plus
+# lumiOnOff->onOff() which binds genOnOff on every endpoint carrying it), and
+# defensively the electricityMeter clusters older converter releases may have
+# bound. Unbinding a combination that never existed just answers NO_ENTRY.
+PURGE_DEFAULT = "1:0xfcc0,4:0xfcc0,1:0x0006,4:0x0006,1:0x0b04,1:0x0702"
+
 def run_bind_probe(port, nwk, src_ieee, src_ep, cluster, dst_ep,
                    ieee_true, ieee_phantom):
     candidates = [
@@ -311,6 +330,66 @@ def run_bind_probe(port, nwk, src_ieee, src_ep, cluster, dst_ep,
         time.sleep(0.3)
     return results, leftovers, mid_visible
 
+def run_phantom_purge(port, nwk, src_ieee, combos, dst_ep, ieee_phantom):
+    """Blind-unbind (src_ep, cluster) x phantom-IEEE without trusting Mgmt_Bind.
+    Returns (removed, absent, errors, verify_ok)."""
+    print(f"\nblind phantom purge: src {ieee_disp(src_ieee)}  "
+          f"dst {ieee_disp(ieee_phantom)}/{dst_ep} (phantom)")
+    removed, absent, errors = [], [], []
+    tsn = 0xA0
+    for ep, cluster in combos:
+        pl = bind_payload(nwk, src_ieee, ep, cluster, ieee_phantom, dst_ep)
+        r = txn_retry(port, 0x0209, pl, tsn, timeout_s=8.0)
+        tsn = (tsn + 4) & 0xFF
+        if r is not None and r[1] == 0x00:
+            removed.append((ep, cluster))
+            verdict = "REMOVED (entry existed)"
+        elif r is not None and r[1] == 0x88:
+            absent.append((ep, cluster))
+            verdict = "not present (NO_ENTRY)"
+        else:
+            errors.append((ep, cluster))
+            verdict = status_str(r)
+        print(f"  unbind ep{ep} cluster 0x{cluster:04x} -> {verdict}")
+        time.sleep(0.3)
+
+    # verify: can the table take a NEW entry now? Uses the neutral IEEE (never
+    # a real destination), so the immediate unbind cannot remove a live bind.
+    vep, vcluster = combos[0]
+    pl = bind_payload(nwk, src_ieee, vep, vcluster, NEUTRAL_IEEE_LE, dst_ep)
+    r = txn_retry(port, 0x0208, pl, tsn, timeout_s=8.0)
+    tsn = (tsn + 4) & 0xFF
+    verify_ok = r is not None and r[1] == 0x00
+    print(f"\nverify bind (neutral IEEE, ep{vep}/0x{vcluster:04x}): {status_str(r)}")
+    if verify_ok:
+        time.sleep(0.3)
+        ru = txn_retry(port, 0x0209, pl, tsn, timeout_s=8.0)
+        if ru is None or ru[1] != 0:
+            print(f"  !! WARNING: verify unbind failed ({status_str(ru)}) — "
+                  f"neutral entry {ieee_disp(NEUTRAL_IEEE_LE)} left behind, re-run to remove")
+        else:
+            print("  verify entry unbound again, clean — table accepts new binds now")
+    else:
+        print("  table still refuses a new entry — purge did not free a slot "
+              "(different combinations may be occupying it; try --purge-list)")
+
+    print(f"\npurge summary: {len(removed)} removed, {len(absent)} not present, "
+          f"{len(errors)} errors; new-bind verify: {'PASS' if verify_ok else 'FAIL'}")
+    if removed:
+        print("removed entries:")
+        for ep, cluster in removed:
+            print(f"  ep{ep} cluster 0x{cluster:04x} -> was bound to the phantom IEEE")
+    if verify_ok:
+        print("\nnext step: restart Z2M and run Configure on the device.")
+    return removed, absent, errors, verify_ok
+
+def parse_purge_list(spec):
+    combos = []
+    for item in spec.split(","):
+        ep, _, cluster = item.strip().partition(":")
+        combos.append((int(ep, 0), int(cluster, 0)))
+    return combos
+
 def main():
     ap = argparse.ArgumentParser(description="Dump/clean a device binding table via an esp-coordinator stick")
     ap.add_argument("port", help="/dev/ttyACM0 | /dev/serial/by-id/... | tcp://IP:6638")
@@ -320,6 +399,13 @@ def main():
     ap.add_argument("--test-bind", action="store_true",
                     help="differential bind probe: bind to real/neutral/phantom "
                          "IEEE, record the three ZDO statuses, unbind again")
+    ap.add_argument("--purge-phantom-blind", action="store_true",
+                    help="blindly unbind known phantom binds without trusting "
+                         "Mgmt_Bind (for devices that under-report their table); "
+                         "SUCCESS = entry existed, NO_ENTRY = it did not")
+    ap.add_argument("--purge-list", default=PURGE_DEFAULT,
+                    help="ep:cluster combinations for --purge-phantom-blind "
+                         f"(default {PURGE_DEFAULT})")
     ap.add_argument("--cluster", default="0xfcc0",
                     help="cluster for --test-bind (default 0xfcc0 manuSpecificLumi)")
     ap.add_argument("--src-ep", default="1", help="device source endpoint (default 1)")
@@ -399,9 +485,9 @@ def main():
     elif args.unbind_phantoms:
         print("\nnothing to unbind — no phantom entries found.")
 
-    # -- optional differential bind probe ------------------------------------
-    if args.test_bind:
-        pre_entries = entries
+    # -- shared src-IEEE resolve for the active-probe modes ------------------
+    src_ieee = None
+    if args.test_bind or args.purge_phantom_blind:
         if args.src_ieee:
             src_ieee = bytes(reversed(bytes.fromhex(args.src_ieee.replace("0x", ""))))
         else:
@@ -410,6 +496,11 @@ def main():
                 print("\n!! could not resolve the device IEEE (ZDO_IEEE_ADDR_REQ) — "
                       "pass it explicitly via --src-ieee 0x...")
                 sys.exit(1)
+
+    # -- optional differential bind probe ------------------------------------
+    exit_code = 0
+    if args.test_bind:
+        pre_entries = entries
         results, leftovers, mid_visible = run_bind_probe(
             port, nwk, src_ieee,
             int(args.src_ep, 0), int(args.cluster, 0), int(args.dst_ep, 0),
@@ -440,7 +531,26 @@ def main():
         print("\nprobe summary:")
         for label, r in results:
             print(f"  {label:24s} {status_str(r)}")
-        sys.exit(2 if leftovers else 0)
+        if leftovers:
+            exit_code = 2
+
+    # -- optional blind phantom purge ----------------------------------------
+    if args.purge_phantom_blind:
+        if nwk == 0x0000:
+            print("\n!! --purge-phantom-blind refused for the coordinator itself "
+                  "(0x0000): self-addressed ZDO bind/unbind wedges the stack "
+                  "(see header notes)")
+            sys.exit(1)
+        combos = parse_purge_list(args.purge_list)
+        if not combos:
+            print("\n!! --purge-list is empty")
+            sys.exit(1)
+        _, _, perrors, verify_ok = run_phantom_purge(
+            port, nwk, src_ieee, combos, int(args.dst_ep, 0), ieee_phantom)
+        if perrors or not verify_ok:
+            exit_code = max(exit_code, 2)
+
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
