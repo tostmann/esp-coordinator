@@ -1133,6 +1133,42 @@ struct zb_ncp::cmd_handle<ZDO_PERMIT_JOINING_REQ> : request_cmd_process< ZDO_PER
         //ESP_LOGI(TAG,"S_ZDO_PERMIT_JOINING_REQ::start_request nwk_addr:%04x time:%d",s_req.dest_addr,int(s_req.permit_duration));
         return zb_zdo_mgmt_permit_joining_req(buf,&Base::req_cb);
     }
+
+    // A ZDO broadcast is never answered (Zigbee spec 2.4.3.3.7; zigbee-herdsman
+    // sends exactly this one with disableResponse=true), so no Mgmt_Permit_Joining_rsp
+    // can ever arrive — yet our request callback still fires. ZBOSS hands it the
+    // REQUEST buffer back, and zdo_send_req() has prepended the ZDP TSN to that
+    // buffer (zb_buf_alloc_left(param,1)), so it reads
+    //     [tsn][permit_duration][tc_significance]
+    // which parsed as zb_zdo_mgmt_permit_joining_resp_t is {tsn, status=duration}.
+    // The TSN therefore matches (the slot resolves) while the "status" is just an
+    // echo of the duration we sent — not a ZDP status at all. That is where the
+    // host-visible nonsense came from: z2m opens with duration=254, so herdsman
+    // logged `PERMIT_JOINING_RESPONSE, status=undefined` (254 is no ZDO status)
+    // and diagnostics chased a phantom error. Nothing had failed.
+    //
+    // Mechanism read off libzboss_stack.zczr (esp-zboss-lib 1.6.4,
+    // zdo_nwk_manage_cli.c / zdo_common.c); bench-proven 6/6 with
+    // test/permit_bcast_status_probe.py — the value tracks the duration byte,
+    // including ZBOSS clamping duration 255 to 254.
+    //
+    // Report success instead: the broadcast itself went out, which is all a
+    // broadcast can tell us. Guarded twice so nothing real gets masked — only for
+    // broadcast destinations (>= 0xFFF8, the same test the stack itself uses to
+    // classify the address) and only when the byte really is that echo, so a
+    // future stack that delivers a genuine status still reaches the host verbatim.
+    static bool response_body_is_synthetic(const request_t& req, uint8_t& status) {
+        if (req.arg.dest_addr < 0xFFF8) {
+            return false;               // unicast, incl. self 0x0000: real response
+        }
+        const uint8_t echo = (req.arg.permit_duration == 0xFF) ? 0xFE
+                                                              : req.arg.permit_duration;
+        if (status != echo) {
+            return false;               // not the echo — pass it through untouched
+        }
+        status = 0;
+        return true;
+    }
 };
 
  // Send Bind request to a remote device

@@ -21,8 +21,15 @@ struct cmd_base {
     	*out_cmd = src_cmd;
     	out_cmd->type = zb_ncp::RESPONSE;
     	report_status(status,*reinterpret_cast<generic_response_t*>(out_cmd+1));
-    	zb_ncp::send_cmd_data( outdata, sizeof(outdata) ); 
+    	zb_ncp::send_cmd_data( outdata, sizeof(outdata) );
     }
+	// Identical wire layout to report_failed (category + status, no body) — a
+	// separate name for the call sites that report a SUCCESS this way, because a
+	// command whose ZBOSS "response" carries no usable body has nothing else to
+	// send. See request_cmd_process::response_body_is_synthetic.
+	static void report_status_only(const zb_ncp::cmd_t& src_cmd, uint8_t status) {
+		report_failed(src_cmd,status);
+	}
 };
 
 template <command_id_t CmdId>
@@ -418,6 +425,10 @@ struct zb_ncp::request_cmd_process : public request_cmd_resolver<CmdId,Arg> {
     	cmd_base<Cmd>::report_failed(src_cmd,status);
     }
 
+    static void report_status_only(const zb_ncp::cmd_t& src_cmd, uint8_t status) {
+    	cmd_base<Cmd>::report_status_only(src_cmd,status);
+    }
+
     static void handle_response(ResolveStrategy::request_t& req,const Resp* resp) {
     	uint8_t outdata[Cmd::resp_buffer_size+sizeof(zb_ncp::cmd_t)];
         zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
@@ -426,6 +437,16 @@ struct zb_ncp::request_cmd_process : public request_cmd_resolver<CmdId,Arg> {
         auto outlen = sizeof(zb_ncp::cmd_t);
         outlen += Cmd::format_response(reinterpret_cast<uint8_t*>(out_cmd+1),resp);
         zb_ncp::send_cmd_data( outdata, outlen ); 
+    }
+    // Hook for "responses" ZBOSS synthesizes instead of receiving off-air.
+    // Default: the response is real, so its ZDP status byte and body are
+    // authoritative. A Cmd that returns true declares the body unusable; req_cb
+    // then answers the host with `status` alone (which the Cmd may rewrite).
+    // Only user today: cmd_handle<ZDO_PERMIT_JOINING_REQ> — see the comment
+    // there for the mechanism and the bench proof.
+    static bool response_body_is_synthetic(const typename ResolveStrategy::request_t&,
+                                           uint8_t&) {
+        return false;
     }
     static void req_cb(uint8_t buf) {
         auto zdp_cmd = static_cast<const zb_uint8_t*>(zb_buf_begin(buf));
@@ -438,7 +459,12 @@ struct zb_ncp::request_cmd_process : public request_cmd_resolver<CmdId,Arg> {
         if (ResolveStrategy::resolve_take(tsn, req)) {
         	ESP_LOGD(TAG,"%s::req_cb %d",Cmd::name,int(tsn));
         	auto status = resp_parser<Resp>::get_status(resp);
-        	if (status == 0) {
+        	if (Cmd::response_body_is_synthetic(req,status)) {
+        		// No usable body — report the status on its own. For the 2-byte
+        		// ZDO responses this is byte-identical to what a successful
+        		// format_response() would emit, so hosts see a normal reply.
+        		report_status_only(req.cmd,status);
+        	} else if (status == 0) {
         		 Cmd::handle_response(req,resp);
         	} else {
         		report_failed(req.cmd,status);
