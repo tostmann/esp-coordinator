@@ -60,3 +60,7 @@ __pycache__/
 # stray build objects / lab artefacts (accidental adds 2026-06)
 *.obj
 LAB_WIFI*
+
+# Voll-Dumps fremder Stick-Firmware vor Umwidmung (4 MB Binaerblobs,
+# Lab-Artefakte — Prozedur/README bleibt getrackt, die .bin nicht).
+/test/stick_backups/*.bin
