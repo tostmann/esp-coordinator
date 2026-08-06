@@ -102,6 +102,28 @@ A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostm
 The stable USB / UART firmware described in this README (and the main flasher) is unchanged.
 
 
+## 🌐 Coordinator over the network: the ESP32-S3 + ESP32-H2 gateway board
+
+The dual-SoC setup mentioned above is not hypothetical — it exists as a finished build. Espressif's **ESP Thread Border Router / Zigbee Gateway board** (~10 USD) carries an ESP32-S3 and an ESP32-H2, and this firmware turns it into a **network-attached Zigbee coordinator**: the H2 runs the full ZBOSS NCP (the same firmware as on a stick, not a reduced variant), the S3 bridges its frame stream to a raw TCP port over Ethernet or WiFi.
+
+👉 **[ESP Zigbee-Gateway flasher](https://install.busware.de/cdc2net/zbgw/)**
+
+```yaml
+serial:
+  adapter: zboss
+  port: tcp://<gateway-ip>:2329
+```
+
+* **One click flashes both chips.** The S3 image carries the H2's firmware in a dedicated flash partition and writes it over the inter-chip UART on first boot (MD5-verified, ~25 s). Later boots verify the radio's application against the staged image (MD5) and rewrite only on a mismatch, so a gateway update leaves a matching radio untouched — and a board with an erased or half-written H2 repairs itself.
+* **Why that is necessary:** Espressif's factory firmware makes the S3 reflash its bundled `ot_rcp` image back onto the H2 when it detects the radio failing to come up as a Spinel RCP (a documented recovery feature). Flashing *only* the H2 with coordinator firmware therefore does not stick.
+* **No add-on hardware required.** WiFi is provisioned over the same USB-C port you flash from (Improv), or via a captive AP if you prefer no cable at all. The Ethernet sub-board is optional and takes precedence when fitted. Web UI on port 80, OTA for both chips.
+* **Gateway side:** [tostmann/cdc2net](https://github.com/tostmann/cdc2net) — this repository provides the coordinator half.
+
+> ⚠️ Flashing this **overwrites Espressif's factory firmware on both chips**; the way back to a Thread border router (Espressif's esp-thread-br firmware) is untested here. Known corner case with the Ethernet sub-board: if the board boots with neither cable nor WiFi credentials, it opens its captive AP after ~2 minutes, and plugging the cable in after that point can leave the Ethernet link stuck until a restart.
+
+Unlike the coexistence build above, this splits the two jobs across two chips — the H2 does nothing but 802.15.4, the S3 does nothing but network.
+
+
 ## Zigbee2MQTT Integration & Hardware Migration
 
 While this coordinator works perfectly with the standard Zigbee2MQTT release, **we highly recommend using our customized Docker image** (`ghcr.io/tostmann/zigbee2mqtt-esp32:latest`).

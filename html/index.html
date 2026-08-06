@@ -319,6 +319,13 @@
         try the <a href="coex/" style="color:#b45309; font-weight:bold;">native WiFi-Coex build</a> (<b>ESP32-C6 only</b>) — the ESP32-C6 joins your WiFi itself and serves the NCP over TCP (no USB host, no ser2net/socat bridge). It's a testground build; feedback welcome on <a href="https://github.com/tostmann/esp-coordinator/discussions/1" target="_blank" style="color:#b45309;">Discussion #1</a>. <span style="color:#92400e;">(The C5's dual-band WiFi does not help coexistence — one 1T1R radio, time-shared; the C5 is supported for the USB/UART build above. The ESP32-H2 has no WiFi at all, so it is USB/UART only.)</span>
     </div>
 
+    <div class="info-box" style="background:#eff6ff; border-left-color:#2563eb;">
+        🌐 <strong>New — a coordinator that lives on your network, not on your USB port:</strong>
+        Espressif's <b>ESP Thread Border Router / Zigbee Gateway board</b> (ESP32-S3 + ESP32-H2, ~10 USD) runs this same coordinator firmware on its H2 while the S3 bridges it to a TCP port over Ethernet or WiFi &mdash; Zigbee2MQTT connects with <code>port: tcp://&lt;gateway-ip&gt;:2329</code>. One click flashes both chips.
+        <a href="../cdc2net/zbgw/" style="color:#1d4ed8; font-weight:bold;">Open the ESP Zigbee-Gateway flasher →</a>
+        <span style="color:#475569;">(Different board, different flasher &mdash; the images on this page are for single-chip C6 / C5 / H2 sticks.)</span>
+    </div>
+
     <details class="release-notes" id="release-notes">
         <summary>Release notes</summary>
         <div class="release-notes-meta" id="release-notes-meta">loading…</div>
