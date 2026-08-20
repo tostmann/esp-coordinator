@@ -377,11 +377,12 @@ advanced:
     <div class="info-section">
         <h3>3. Coordinator (already flashed) — Identify, Backup, Restore</h3>
         <p style="font-size: 14px; color: #475569; margin: 6px 0 0 0;">
-            For a stick that already has the firmware: connect via USB and click <strong>Identify</strong> to read the live network state, firmware version, IEEE address and paired-device count. Below, you can then back up the network as a Z2M-compatible <code>coordinator_backup.json</code>, restore from one, or — if the firmware is outdated or the chip is factory-fresh — flash the latest firmware.
+            For a stick that already has the firmware: connect via USB and click <strong>Identify</strong> to read the live network state, firmware version, IEEE address and paired-device count. Below, you can then back up the network as a Z2M-compatible <code>coordinator_backup.json</code>, restore from one, or — if the firmware is outdated or the chip is factory-fresh — flash the latest firmware. <strong>Reset device</strong> restarts the chip and identifies it again — use it if Identify fails right after flashing; the page never resets a connected coordinator on its own.
         </p>
 
         <div class="info-actions">
             <button class="btn-primary" onclick="identifyCoordinator()">Identify connected device</button>
+            <button class="btn-secondary" onclick="resetCoordinator()">Reset device</button>
         </div>
 
         <div id="info-card">

@@ -509,6 +509,11 @@ async function _identifyOnPort(port, logger) {
         const ok = await _identifyOnPortSingle(port, logger);
         if (ok) return true;
     }
+    // The page never resets the chip on its own (see connect()), so a device
+    // that is mid-boot or parked in the bootloader after a flash cannot be
+    // cleared by retrying — say so instead of leaving the user guessing.
+    logger("Both attempts failed. If the stick was just flashed, or if the log shows "
+           + "CRC16 mismatches or a Break, click \"Reset device\" and try again.");
     return false;
 }
 
@@ -663,6 +668,57 @@ async function _identifyOnPortSingle(port, logger) {
         }
     }
     return ok;
+}
+
+// Pulse RTS while holding DTR low — the line sequence esptool uses for its
+// "hard reset" on a USB-Serial/JTAG chip (RTS drives EN, DTR drives boot
+// select). DTR MUST stay low: with DTR asserted the chip comes up in download
+// mode instead of the application. Measured on an ESP32-C6: the ROM banner
+// follows the pulse and the firmware's first NCP frame arrives 0.25 s later.
+async function pulseReset(port) {
+    await port.setSignals({ dataTerminalReady: false, requestToSend: true });
+    await new Promise(r => setTimeout(r, 150));
+    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+}
+
+// Reset the device, then identify it. connect() deliberately never resets the
+// chip so a live coordinator is not rebooted mid-session; this button is the
+// explicit way to do it when a device needs clearing after a flash.
+async function resetCoordinator() {
+    const logger = (msg) => document.getElementById('log').innerText += msg + '\n';
+    let port;
+    try {
+        port = await navigator.serial.requestPort();
+    } catch (e) {
+        logger("Error: " + e);
+        return;
+    }
+    try {
+        await port.open({ baudRate: 115200 });
+    } catch (e) {
+        logger("Reset error: cannot open the port (" + e.message + ").");
+        return;
+    }
+    try {
+        await pulseReset(port);
+        logger("Reset pulse sent.");
+    } catch (e) {
+        logger("Reset error: " + e.message + " — this browser may not support setSignals().");
+        try { await port.close(); } catch (e2) {}
+        return;
+    }
+    try { await port.close(); } catch (e) {}
+    // Firmware needs a moment to reach its boot frame (0.25 s measured; the
+    // margin covers a slower boot, e.g. after a factory erase).
+    await new Promise(r => setTimeout(r, 2000));
+    _resetInfoCard();
+    logger("Identifying after reset…");
+    try {
+        await _identifyOnPort(port, logger);
+    } catch (e) {
+        logger("Identify after reset failed: " + e.message
+               + " — if the device re-enumerated on USB, click Identify and select it again.");
+    }
 }
 
 async function identifyCoordinator() {
@@ -893,4 +949,5 @@ async function doRestore() {
 window.doBackup = doBackup;
 window.doRestore = doRestore;
 window.identifyCoordinator = identifyCoordinator;
+window.resetCoordinator = resetCoordinator;
 window.modalRefreshAndIdentify = modalRefreshAndIdentify;

@@ -374,11 +374,12 @@ advanced:
     <div class="info-section">
         <h3>3. Coordinator (bereits geflasht) — Identify, Backup, Restore</h3>
         <p style="font-size: 14px; color: #475569; margin: 6px 0 0 0;">
-            Für einen Stick mit bereits installierter Firmware: über USB anschließen und <strong>Identify</strong> klicken, um Live-Netzwerk-Status, Firmware-Version, IEEE-Adresse und Anzahl gepairter Geräte abzurufen. Darunter kann das Netzwerk als Z2M-kompatible <code>coordinator_backup.json</code> gesichert oder aus einer Datei wiederhergestellt werden — und falls die Firmware veraltet oder der Chip Factory-fresh ist, lässt sich die aktuelle Firmware direkt flashen.
+            Für einen Stick mit bereits installierter Firmware: über USB anschließen und <strong>Identify</strong> klicken, um Live-Netzwerk-Status, Firmware-Version, IEEE-Adresse und Anzahl gepairter Geräte abzurufen. Darunter kann das Netzwerk als Z2M-kompatible <code>coordinator_backup.json</code> gesichert oder aus einer Datei wiederhergestellt werden — und falls die Firmware veraltet oder der Chip Factory-fresh ist, lässt sich die aktuelle Firmware direkt flashen. <strong>Gerät zurücksetzen</strong> startet den Chip neu und identifiziert ihn anschließend erneut — hilfreich, wenn Identify direkt nach dem Flashen fehlschlägt; die Seite setzt einen angeschlossenen Koordinator von sich aus nie zurück.
         </p>
 
         <div class="info-actions">
             <button class="btn-primary" onclick="identifyCoordinator()">Identify connected device</button>
+            <button class="btn-secondary" onclick="resetCoordinator()">Gerät zurücksetzen</button>
         </div>
 
         <div id="info-card">
