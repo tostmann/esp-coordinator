@@ -48,9 +48,6 @@
 /.gemini/
 /.geminignore
 
-# Local working notes from code review (internal, not a release artifact).
-/test/CODE_REVIEW_FOLLOWUP.md
-
 # Atomic-write temp siblings from scripts/bump_build.sh (version.txt.tmp,
 # build_number.txt.tmp). Normally removed by os.replace; a stale one left by a
 # mid-write crash must not be swept into a snapshot by the hook's `git add -A`.
@@ -61,6 +58,21 @@ __pycache__/
 *.obj
 LAB_WIFI*
 
-# Voll-Dumps fremder Stick-Firmware vor Umwidmung (4 MB Binaerblobs,
-# Lab-Artefakte — Prozedur/README bleibt getrackt, die .bin nicht).
-/test/stick_backups/*.bin
+# test/ is the dumping ground for runtime artefacts — captures, logs, run
+# reports, probe scripts written for one investigation, drafts of forum and
+# issue replies. None of that belongs on the public remote, and the pre-build
+# hook's `git add -A` would otherwise sweep it into snapshot commits (it did,
+# repeatedly). Ignore the directory and whitelist the few files that earn their
+# place: things a USER needs (remediation tools) or that the docs reference.
+# Anything else stays local. Add to the whitelist deliberately, never by habit.
+/test/*
+!/test/README.md
+!/test/rollout_check.sh
+!/test/bind_table_tool.py
+!/test/usj_tcp_bridge.py
+!/test/dup_drop_check.py
+!/test/getset_ext_pan_check.py
+!/test/permit_bcast_status_probe.py
+!/test/permit_gate_check.py
+!/test/routing_gate_check.py
+!/test/smoke_structured_backup.py
