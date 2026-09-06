@@ -257,7 +257,18 @@ struct zb_ncp::cmd_handle<GET_ZIGBEE_CHANNEL_MASK> : immediate_cmd_process<GET_Z
 	static void process_status_res(ncp_generic_status_t& status,GET_ZIGBEE_CHANNEL_MASK_resp_t* res) {
     	res->len = 1;
     	res->page = 0;
-    	res->mask = zb_get_channel_mask();
+    	// After a structured restore + reboot, zb_get_channel_mask() can
+    	// return out-of-spec values (observed: 0x00FFFFFF — bits below
+    	// channel 11 set). zigpy rejects such bitmaps (its Channels type
+    	// raises on unexpected members, crashing backup serialization and
+    	// the ZHA repair flow), so clamp to the valid 2.4 GHz channel set
+    	// and fall back to the current channel when nothing valid remains.
+    	uint32_t mask = zb_get_channel_mask() & 0x07FFF800u;
+    	if (mask == 0u) {
+    		uint8_t ch = zb_get_current_channel();
+    		mask = (ch >= 11 && ch <= 26) ? (1u << ch) : 0x07FFF800u;
+    	}
+    	res->mask = mask;
     }
 };
 // // Set Zigbee channels page and mask
