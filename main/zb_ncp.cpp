@@ -20,6 +20,14 @@ static const char* TAG = "NCP";
 
 #include "commands_impl.h"
 
+// Channel mask from a restored TAG_CHANNEL. init_int() refreshes
+// m_channels_mask from zb_get_channel_mask() AFTER apply_pending_restore()
+// runs, and at that point the getter still reports the stack default — so
+// the restored mask must be carried to the forced formation separately or
+// formation scans the default mask and forms on the lowest channel (11)
+// instead of the restored one.
+static uint32_t s_restore_channel_mask = 0;
+
 // Set to true by apply_pending_restore() when it actually applies a TLV.
 // continue_zboss reads it to force NETWORK_FORMATION (which performs the
 // channel-scan step) instead of the default STEERING — without the explicit
@@ -132,7 +140,14 @@ static void apply_pending_restore() {
                     zb_set_channel_mask(mask);
                     zb_set_bdb_primary_channel_set(mask);
                     zb_set_bdb_secondary_channel_set(mask);
-                    ESP_LOGI(TAG, "  Channel = %u (mask 0x%08lx)", ch, (unsigned long)mask);
+                    s_restore_channel_mask = mask;
+                    // The restore-forced FORMATION on an already-provisioned
+                    // NIB completes without a channel scan, so the transceiver
+                    // stays on the MAC default channel. Preset the PIB cache
+                    // the way an NVRAM dataset load would — MAC picks it up
+                    // when the stack starts.
+                    ZB_PIBCACHE_CURRENT_CHANNEL() = ch;
+                    ESP_LOGI(TAG, "  Channel = %u (mask 0x%08lx, PIB preset)", ch, (unsigned long)mask);
                 }
             } break;
             case backup_structured::TAG_NWK_UPDATE_ID: {
@@ -579,7 +594,8 @@ void zb_ncp::continue_zboss(uint8_t arg) {
         // the scan to the restored channel and the NIB values we just set
         // survive because we are in factory-reset state per #445.
         ESP_LOGI(TAG, "continue_zboss: restore applied, forcing NETWORK_FORMATION");
-        set_channel_mask(instance().m_channels_mask);
+        set_channel_mask(s_restore_channel_mask ? s_restore_channel_mask
+                                                : instance().m_channels_mask);
         bdb_start_top_level_commissioning(ZB_BDB_NETWORK_FORMATION);
     } else {
         // BOOT-1: plain boot (no pending formation, no restore). Run ONLY the
@@ -716,6 +732,16 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
             // decision via NWK_PERMIT_JOINING. Also covers the
             // restore-forced formation path (s_restore_applied).
             ESP_LOGI(TAG, "Formed network successfully");
+            if (s_restore_applied) {
+                // The restored NWK outgoing frame counter lives only in RAM at
+                // this point: the formation persisted ZB_IB_COUNTERS before
+                // esp_zb_nwk_set_frame_counter's value landed, so a reboot
+                // would resume from ~0 and every device would drop our
+                // NWK-secured traffic as replays. Persist it now, while the
+                // live counter demonstrably holds the restored value.
+                zb_nvram_write_dataset(ZB_IB_COUNTERS);
+                ESP_LOGI(TAG, "restore: persisted ZB_IB_COUNTERS (frame counter)");
+            }
         }
 
         break;
