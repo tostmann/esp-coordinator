@@ -88,7 +88,7 @@ A full whole-codebase review fixed two memory-safety criticals and a batch of ro
 
 A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostmann/esp-coordinator/tree/wifi-coex), **ESP32-C6 only**) lets the coordinator **join your Wi-Fi itself** and expose the ZBOSS NCP over an on-device **TCP server** — no USB host, no ser2net/socat bridge. Zigbee2MQTT then connects with `port: tcp://<device-ip>:6638` and `adapter: zboss`.
 
-👉 **[Experimental WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**
+👉 [**Experimental WiFi-Coex flasher**](https://install.busware.de/zboss/coex/)
 
 * **Provisioning:** flash in the browser, then enter your Wi-Fi in the same flow (Improv-Serial). The device saves it and reboots onto your network. After provisioning, the flasher's "Visit Device" link opens a small setup page served by the coordinator itself.
 * **Re-configure Wi-Fi later:** power-cycle and, within the first 120 s, use "Change Wi-Fi" in the flasher — no reflash needed.
@@ -106,7 +106,7 @@ The stable USB / UART firmware described in this README (and the main flasher) i
 
 The dual-SoC setup mentioned above is not hypothetical — it exists as a finished build. Espressif's **ESP Thread Border Router / Zigbee Gateway board** (~10 USD) carries an ESP32-S3 and an ESP32-H2, and this firmware turns it into a **network-attached Zigbee coordinator**: the H2 runs the full ZBOSS NCP (the same firmware as on a stick, not a reduced variant), the S3 bridges its frame stream to a raw TCP port over Ethernet or WiFi.
 
-👉 **[ESP Zigbee-Gateway flasher](https://install.busware.de/cdc2net/zbgw/)**
+👉 [**ESP Zigbee-Gateway flasher**](https://install.busware.de/cdc2net/zbgw/)
 
 ```yaml
 serial:
@@ -143,7 +143,7 @@ Our custom image unlocks **Native NVRAM Snapshots**, allowing Zigbee2MQTT to aut
 
 The relevant host-side patches (`RESTORE_NETWORK` adapter integration plus the `onPackage`-during-`inReset` fix that closes the factory-reset hang) live in `scripts/patch_zboss.js` on the [`tostmann/zigbee2mqtt`](https://github.com/tostmann/zigbee2mqtt) fork and are applied automatically via npm `postinstall`.  See [`patches/herdsman-ncp-reset-fix.md`](./patches/herdsman-ncp-reset-fix.md) in this repo for the technical rationale.
 
-👉 **[Read the full Zigbee2MQTT Setup & Migration Guide](ZIGBEE2MQTT.md)**
+👉 [**Read the full Zigbee2MQTT Setup & Migration Guide**](ZIGBEE2MQTT.md)
 
 ## Home Assistant ZHA (experimental)
 
@@ -207,11 +207,11 @@ Pins and baud rate are build-time configurable (`menuconfig` → *Zigbee Network
 ### 1. Web Installer (Recommended)
 You can flash the firmware directly from your browser using our Web Serial Flasher tool. This is the easiest method and requires no software installation.
 
-👉 **[Launch ESP-Coordinator Web Flasher](https://install.busware.de/zboss/)** 
+👉 [**Launch ESP-Coordinator Web Flasher**](https://install.busware.de/zboss/) 
 
 *(Supported Browsers: Chrome, Edge, Opera. The flasher auto-detects your chip and serves the matching image for **ESP32-C6** and **ESP32-C5**.)*
 
-> 🧪 **Experimental — want the coordinator on Wi-Fi instead of USB?** Try the **[native WiFi-Coex flasher](https://install.busware.de/zboss/coex/)**: the ESP32-C6 joins your Wi-Fi itself and serves the NCP over TCP (no USB host, no ser2net/socat). It's a testground build — see [Experimental: native Wi-Fi (coexistence)](#-experimental-native-wi-fi-coexistence-mode-b) below, and please report back on [Discussion #1](https://github.com/tostmann/esp-coordinator/discussions/1).
+> 🧪 **Experimental — want the coordinator on Wi-Fi instead of USB?** Try the [**native WiFi-Coex flasher**](https://install.busware.de/zboss/coex/): the ESP32-C6 joins your Wi-Fi itself and serves the NCP over TCP (no USB host, no ser2net/socat). It's a testground build — see [Experimental: native Wi-Fi (coexistence)](#-experimental-native-wi-fi-coexistence-mode-b) below, and please report back on [Discussion #1](https://github.com/tostmann/esp-coordinator/discussions/1).
 
 ### 2. Manual CLI Flashing
 Alternatively, you can flash the provided factory binary directly to the `0x0` offset of your board. The single binary includes the bootloader, partition table, OTA data, and the app. **Use the binary that matches your chip** — they are not interchangeable (the C5's second-stage bootloader sits at flash `0x2000`, the C6's at `0x0`; each factory image already carries the correct internal layout and is written from `0x0`).
