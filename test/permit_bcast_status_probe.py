@@ -73,9 +73,11 @@ class SerialShim:
     """Gleiche Fassade wie SockSerial, aber auf einem echten Port.
 
     Geoeffnet wie in permit_gate_check.py: erst Attribute setzen, dtr/rts auf
-    False, dann open(). Der Ein-Zeiler serial.Serial(dev,...) HAENGT am
-    USB-Serial/JTAG des ESP32-C6 (hier reproduziert, Timeout ohne einen
-    einzigen Frame).
+    False, dann open(). Das startet den Chip beim Oeffnen neu: pyserial setzt
+    nach dem Kernel-Open kurz RTS=1/DTR=0, und das ist am USB-Serial/JTAG ein
+    Reset (ESP32-H2 TRM, Tab. 33.3-2). Ein einfaches serial.Serial(dev)
+    resettet nicht und funktioniert ebenso; eine fruehere Notiz, es haenge am
+    ESP32-C6, liess sich nicht bestaetigen.
     """
     def __init__(self, dev):
         import serial

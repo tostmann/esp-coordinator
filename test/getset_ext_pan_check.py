@@ -112,10 +112,11 @@ def hx(b): return ":".join(f"{x:02x}" for x in b)
 
 def main():
     print(f"== GETSET-3 HW SET->GET check on {PORT} ==")
-    # Open with DTR/RTS LOW (matches html/zboss_backup.js): the ESP32-C6
-    # USB-Serial-JTAG treats asserted DTR/RTS at open() as a reset request and
-    # will otherwise hold the chip in reset. Opening still pulses a reset, so
-    # wait out the ~2-3s boot and drain the boot-ready (NCP_RESET tsn=0xFF) frame.
+    # Open with DTR/RTS LOW (matches html/zboss_backup.js). With pyserial this
+    # pulses a reset: the kernel raises both lines on open, pyserial then clears
+    # DTR first, and RTS=1/DTR=0 resets the chip (USB-Serial/JTAG, ESP32-H2 TRM
+    # table 33.3-2). So wait out the boot and drain the boot-ready
+    # (NCP_RESET tsn=0xFF) frame.
     ser = serial.Serial()
     ser.port = PORT; ser.baudrate = 115200; ser.timeout = 0.1
     ser.dtr = False; ser.rts = False

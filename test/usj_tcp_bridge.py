@@ -2,16 +2,18 @@
 # usj_tcp_bridge.py — stellt einen ESP32-C6/H2-NCP mit nativem USB-Serial/JTAG
 # als TCP-Port bereit (z.B. fuer `serial: port: tcp://127.0.0.1:2330` in z2m).
 #
-# WARUM: zigbee-herdsman (und jede Standard-serialport-Anbindung) oeffnet den
-# Port mit ASSERTIERTEM DTR/RTS. Auf dem USB-Serial/JTAG ist genau diese
-# Kombination die esptool-Auto-Reset-Sequenz — der Chip landet im
-# ROM-Download-Mode und antwortet nie auf NCP-Frames. Symptom: z2m stirbt an
-# `{"commandId":20} after 30000ms`, danach ist der Stick auch fuer eigene
-# Skripte stumm (Write-Timeout), bis ein `esptool --after hard_reset` ihn
-# wieder startet.
+# WARUM: So erreicht z2m (oder ein Test) den NCP per `tcp://`, auch von einem
+# anderen Rechner, und die TCP-Verbindung uebersteht einen NCP-Neustart, weil
+# die Bridge den seriellen Port offen haelt. Die Bytes gehen 1:1 durch.
 #
-# Diese Bridge oeffnet seriell mit dtr=False/rts=False (die Semantik, mit der
-# der NCP nachweislich antwortet) und reicht die Bytes 1:1 ueber TCP weiter.
+# Die Bridge oeffnet mit dtr=False/rts=False. pyserial setzt nach dem
+# Kernel-Open (RTS=1/DTR=1) erst DTR=0 und dann RTS=0; der Zwischenzustand
+# RTS=1/DTR=0 setzt den Chip zurueck (ESP32-H2 TRM, Tab. 33.3-2). Jedes Oeffnen
+# startet den Chip also neu in die Firmware. Eine fruehere Fassung dieses
+# Kommentars behauptete, zigbee-herdsman bringe den Chip beim Oeffnen in den
+# Download-Mode. Das war falsch: der Kernel setzt beide Leitungen gemeinsam,
+# RTS=1/DTR=1 ist laut TRM "no action", und zigbee-herdsman laeuft direkt am
+# USB-Serial/JTAG (auf ESP32-H2 und ESP32-C6 nachgeprueft).
 #
 # Usage: python3 test/usj_tcp_bridge.py <serial-dev> [port] [laufzeit-s]
 import os
