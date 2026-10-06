@@ -70,6 +70,7 @@ LAB_WIFI*
 !/test/rollout_check.sh
 !/test/bind_table_tool.py
 !/test/usj_tcp_bridge.py
+!/test/usj_diag.py
 !/test/dup_drop_check.py
 !/test/getset_ext_pan_check.py
 !/test/permit_bcast_status_probe.py
