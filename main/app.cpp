@@ -1,3 +1,4 @@
+#include "diag_usj.h"
 #include "app.h"
 #include "boot_guard.h"
 #include "transport.h"
@@ -188,7 +189,9 @@ esp_err_t app::start_int() {
     while (true) {
         // Bounded wait so the request watchdog runs even on an idle link; on a
         // busy link it runs after each event (self-rate-limited internally).
+        diag::count_app_loop();
         if (xQueueReceive(m_queue, &ctx, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            diag::count_app_event((int)ctx.event);
             if (process_event(ctx) != ESP_OK) {
                 // Per-event failure must not tear down the NCP link — a transient
                 // stream-buffer or oversize-packet error on one ctx is independent

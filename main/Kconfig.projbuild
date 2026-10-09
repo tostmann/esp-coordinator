@@ -160,4 +160,19 @@ menu "Zigbee"
         help
             Setting Zigbee stack debug mode.
 
+    config NCP_DEBUG_USJ_STATUS
+        bool "Diagnostics: USB-Serial/JTAG status log on the UART0 console"
+        default n
+        help
+            Diagnostic aid for issue #17 (USB-Serial/JTAG link silent after a
+            host reboot while the chip still drains the port). Logs controller
+            events every 50 ms (USB bus reset, bus active/idle, DTR/RTS changes,
+            TX routing flips) and a status line every 2 s (raw controller
+            registers, transport/app counters, task states) to the UART0
+            console, plus two stall warnings: TX pending while the host polls
+            IN, and an event pump that stopped iterating (with a task list).
+            The USB-Serial/JTAG link itself carries no log output. Requires
+            CONFIG_LOG_MAXIMUM_LEVEL >= INFO. On the ESP32-H2 disable
+            NCP_UART_TRANSPORT as well: its default RX pin GPIO23 is U0RXD.
+
 endmenu

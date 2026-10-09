@@ -1,6 +1,7 @@
 #include "transport.h"
 #include "app.h"
 #include "utils.h"
+#include "diag_usj.h"
 
 #include <esp_log.h>
 #include "sdkconfig.h"
@@ -55,7 +56,9 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
 
     if (active != IFACE_UART) {
         const TickType_t ticks = (active == IFACE_USB) ? pdMS_TO_TICKS(RINGBUF_TIMEOUT_MS) : 0;
-        if (usb_serial_jtag_write_bytes(buffer, size, ticks) == (int)size) {
+        const bool usb_ok = usb_serial_jtag_write_bytes(buffer, size, ticks) == (int)size;
+        diag::count_usb_write(usb_ok);
+        if (usb_ok) {
             delivered = true;
         } else if (active == IFACE_USB) {
             ESP_LOGE(TAG, "usb write failed (%u bytes)", (unsigned)size);
@@ -169,6 +172,7 @@ void transport::rx_qualified_pump(iface_t iface, bool& pending_de, const uint8_t
     }
 
     m_active.store(iface, std::memory_order_relaxed);
+    diag::count_route(iface);
     pending_de = false;
     if (spans) {
         const uint8_t de = 0xDE;                   // re-inject the 0xDE swallowed with the previous chunk
@@ -183,6 +187,7 @@ void transport::task_int() {
     while (true) {
         int readed = usb_serial_jtag_read_bytes(m_temp_buf, BUF_SIZE, pdMS_TO_TICKS(10));
         if (readed > 0) {
+            diag::count_usb_rx(readed);
             rx_qualified_pump(IFACE_USB, m_usb_pending_de, m_temp_buf, readed);
         }
     }

@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "app.h"
 #include "boot_guard.h"
+#include "diag_usj.h"
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
@@ -191,6 +192,7 @@ extern "C" void app_main(void)
     ESP_LOGI("BOOT", "reset reason: %d", (int)esp_reset_reason());
 
     boot_guard::init();
+    diag::start();
     handle_pending_erase();
 #if CONFIG_IDF_TARGET_ESP32C6
 #if CONFIG_NCP_XIAO_EXT_ANTENNA
