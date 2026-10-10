@@ -161,18 +161,30 @@ menu "Zigbee"
             Setting Zigbee stack debug mode.
 
     config NCP_DEBUG_USJ_STATUS
-        bool "Diagnostics: USB-Serial/JTAG status log on the UART0 console"
+        bool "Diagnostics: USB-Serial/JTAG event log and status on the UART0 console"
         default n
         help
             Diagnostic aid for issue #17 (USB-Serial/JTAG link silent after a
-            host reboot while the chip still drains the port). Logs controller
-            events every 50 ms (USB bus reset, bus active/idle, DTR/RTS changes,
-            TX routing flips) and a status line every 2 s (raw controller
-            registers, transport/app counters, task states) to the UART0
-            console, plus two stall warnings: TX pending while the host polls
-            IN, and an event pump that stopped iterating (with a task list).
-            The USB-Serial/JTAG link itself carries no log output. Requires
-            CONFIG_LOG_MAXIMUM_LEVEL >= INFO. On the ESP32-H2 disable
-            NCP_UART_TRANSPORT as well: its default RX pin GPIO23 is U0RXD.
+            host reboot while the chip still drains the port). Watches the
+            controller every 50 ms (USB bus resets, bus active/idle, DTR/RTS,
+            TX routing flips, USB RX and write results, the TX path) and the
+            app event pump, and records every event in an event log in .noinit
+            RAM that keeps the last four boots. The log survives the resets
+            that heal the silent link and the host reads it with the
+            DEBUG_USJ_LOG command (0x009F, test/issue17_log.py). The same
+            events and a status line every 2 s go to the UART0 console (TX
+            only); the USB-Serial/JTAG link itself carries no log output.
+            Requires CONFIG_LOG_MAXIMUM_LEVEL >= INFO.
+
+    config NCP_DEBUG_USJ_TX_KICK
+        bool "Diagnostics: restart a stalled USB TX path with a zero-length packet"
+        depends on NCP_DEBUG_USJ_STATUS
+        default y
+        help
+            When the USB-Serial/JTAG driver has data queued but the IN FIFO is
+            free and no SERIAL_IN_EMPTY event is pending for 1 s, the event
+            that starts the next transfer was lost and nothing would be sent
+            again. A zero-length IN packet makes the controller raise the
+            event once the host reads it. Every kick is logged.
 
 endmenu

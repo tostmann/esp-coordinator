@@ -318,6 +318,12 @@ void zb_ncp::on_rx_data(const void* data,size_t size) {
 			// a wedged stick may be choking on.
 			cmd_handle<NCP_RESET>::process(cmd, buf, len);
 			break;
+#if CONFIG_NCP_DEBUG_USJ_STATUS
+		case DEBUG_USJ_LOG:
+			// RAM event log of the issue #17 diagnostic build, no stack state.
+			cmd_handle<DEBUG_USJ_LOG>::process(cmd, buf, len);
+			break;
+#endif
 		default: {
 			uint8_t outdata[2+sizeof(zb_ncp::cmd_t)];
 			zb_ncp::cmd_t* out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);

@@ -1,6 +1,8 @@
-# Issue #17 diagnostic build (local, not for release): USB-only NCP + USJ diagnostics on UART0.
+# Issue #17 diagnostic build: v1.5.77 + USB-Serial/JTAG event log (RAM, read with
+# test/issue17_log.py), status on the UART0 console, TX kick. Everything else as
+# the release build, including the NCP UART transport.
 CONFIG_NCP_DEBUG_USJ_STATUS=y
-CONFIG_NCP_UART_TRANSPORT=n
+CONFIG_NCP_DEBUG_USJ_TX_KICK=y
 CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=6144

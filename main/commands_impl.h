@@ -2,6 +2,7 @@
 #include "nvs_flash.h"
 #include "app.h"
 #include "boot_guard.h"
+#include "diag_usj.h"
 #include "version.h"
 
 #include "commands_helpers.h"
@@ -2357,6 +2358,31 @@ struct zb_ncp::cmd_handle<GET_NETWORK_BACKUP> : immediate_cmd_process<GET_NETWOR
         return sizeof(generic_response_t) + 8 + len;
     }
 };
+
+#if CONFIG_NCP_DEBUG_USJ_STATUS
+// Issue #17 diagnostic builds: chunked readout of the USB-Serial/JTAG event log
+// that main/diag_usj.cpp keeps in .noinit RAM. Same layout as GET_NETWORK_BACKUP:
+// request = offset (u32); response = total size (u32), chunk length (u32), data.
+template <>
+struct zb_ncp::cmd_handle<DEBUG_USJ_LOG> : immediate_cmd_process<DEBUG_USJ_LOG> {
+    static constexpr size_t resp_buffer_size = sizeof(generic_response_t) + 8 + 128;
+    static size_t process_immediate(const void *inbuffer, size_t inlen, uint8_t* outdata, size_t outdata_size) {
+        uint32_t offset = 0;
+        if (inlen >= 4) {
+            memcpy(&offset, inbuffer, 4);
+        }
+        auto res = reinterpret_cast<generic_response_t*>(outdata);
+        res->category = STATUS_CATEGORY_GENERIC;
+        res->status = GENERIC_OK;
+        uint8_t* payload = outdata + sizeof(generic_response_t);
+        uint32_t total = 0;
+        const uint32_t len = diag::log_read(offset, payload + 8, 128, &total);
+        memcpy(payload,     &total, 4);
+        memcpy(payload + 4, &len,   4);
+        return sizeof(generic_response_t) + 8 + len;
+    }
+};
+#endif
 
 // Feature 4: gross-garbage gate for a restored zb_storage image. HONEST SCOPE --
 // catches truncated/zeroed/garbage uploads (all-0xFF, all-0x00, wrong page
