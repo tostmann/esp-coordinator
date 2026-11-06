@@ -4,7 +4,7 @@ A highly optimized ZBOSS NCP Serial Protocol implementation for ESP32-C6 / ESP32
 
 This firmware transforms any cheap, standard ESP32-C6 (or ESP32-C5) development board into an enterprise-grade Zigbee Coordinator that rivals or exceeds established commercial adapters.
 
-[Protocol specification](https://wiki.homed.dev/files/9/95/ZBOSS_NCP_Serial_Protocol.pdf)
+[Protocol specification](https://web.archive.org/web/20250810103623/https://wiki.homed.dev/files/9/95/ZBOSS_NCP_Serial_Protocol.pdf) (ZBOSS NCP Serial Protocol v1.5, DSR Corporation, May 2023; Internet Archive copy, the original link on wiki.homed.dev is gone)
 
 ## Why ESP32-C6? (Competitive Positioning)
 
