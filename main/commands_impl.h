@@ -1876,11 +1876,15 @@ struct zb_apsde_data_resp_t {
     uint32_t tx_time;       // 10
     uint8_t _unknown1[0x12-(10+4)];     
     uint8_t dst_addr_mode;  // 0x12
-    uint8_t status; // 0x13
-    uint8_t _unknown2[0x19-0x14];
+    // 0x13: a full zb_ret_t, not a byte. Measured 2026-11-07 on the C6 (raw confirm
+    // bytes of a secured 74-byte unicast): 57 fb ff ff = -1193 =
+    // ERROR_CODE(ERROR_CATEGORY_APS, ZB_APS_STATUS_ASDU_TOO_LONG), see zb_errors.h.
+    zb_ret_t status;        // 0x13
+    uint8_t _unknown2[0x19-0x17];
 } __attribute__((packed));
 
 static_assert(sizeof(zb_apsde_data_resp_t) == 0x19);
+static_assert(sizeof(zb_ret_t) == 4);
 
 // APS-SEC-1 (2026-10-13): APS link-key security per frame. zigpy >= 2.3.0 asks for it
 // on KeepAlive (0x0025) and Zigbee Direct Configuration (0x003D) by setting TxOptions
@@ -1923,6 +1927,43 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     using CmdBase = cmd_base< zb_ncp::cmd_handle<APSDE_DATA_REQ> >;
     using ResolveStrategy = request_cmd_resolver<APSDE_DATA_REQ,APSDE_DATA_REQ_max_arg_t>;
     using Arg = apsde_data_req_arg_t;
+
+    // A failed send or confirm carries a zb_ret_t, ERROR_CODE(category, code) =
+    // -(category * 256 + code) (zb_errors.h). The protocol reports APSDE_DATA_REQ
+    // failures as category + code (ZBOSS NCP Serial Protocol 3.4.4.1 and 3.5.4.1,
+    // e.g. APS NO_ACK, APS ASDU_TOO_LONG); its categories GENERIC 0, MAC 2, NWK 3,
+    // APS 4, ZDO 5, CBKE 6 are ZBOSS's ERROR_CATEGORY_* numbers. Up to v1.5.80 the
+    // int was cut to its low byte and sent as GENERIC: ASDU_TOO_LONG arrived as
+    // 0/0x57, APS NO_ACK as 0/0x59. Values outside these categories (SYSTEM,
+    // NVRAM, ...) and positive values keep the old encoding.
+    static void report_ret_failed(const zb_ncp::cmd_t& src_cmd, zb_ret_t ret) {
+        uint8_t category = STATUS_CATEGORY_GENERIC;
+        uint8_t code = static_cast<uint8_t>(ret);
+        if (ret < 0) {
+            const int c = ERROR_GET_CATEGORY(ret);
+            switch (c) {
+            case ERROR_CATEGORY_GENERIC:
+            case ERROR_CATEGORY_MAC:
+            case ERROR_CATEGORY_NWK:
+            case ERROR_CATEGORY_APS:
+            case ERROR_CATEGORY_ZDO:
+            case ERROR_CATEGORY_CBKE:
+                category = static_cast<uint8_t>(c);
+                code = static_cast<uint8_t>(ERROR_GET_CODE(ret));
+                break;
+            default:
+                break;
+            }
+        }
+        uint8_t outdata[sizeof(zb_ncp::cmd_t) + sizeof(generic_response_t)];
+        auto out_cmd = reinterpret_cast<zb_ncp::cmd_t*>(outdata);
+        *out_cmd = src_cmd;
+        out_cmd->type = zb_ncp::RESPONSE;
+        auto resp = reinterpret_cast<generic_response_t*>(out_cmd + 1);
+        resp->category = static_cast<ncp_status_category_t>(category);
+        resp->status = static_cast<ncp_generic_status_t>(code);
+        zb_ncp::send_cmd_data(outdata, sizeof(outdata));
+    }
 
  //         {name: 'ieee', type: DataType.IEEE_ADDR},
 //         {name: 'dstEndpoint', type: DataType.UINT8, condition: (payload) => [2, 3].includes(payload.dstAddrMode)},
@@ -1980,7 +2021,7 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
 	        	if (ind->status == 0) {
 	        		 Cmd::handle_response(req,ind);
 	        	} else {
-	        		report_failed(req.cmd,ind->status);
+	        		report_ret_failed(req.cmd,ind->status);
 	        	}
             } else {
             	ESP_LOGW(TAG,"%s: confirm for slot %d after its request was freed or re-used",Cmd::name,int(sent.idx));
@@ -2108,7 +2149,7 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     			failed_cmd = req.cmd;
     			req.state = ResolveStrategy::request_t::S_NONE;
     		}
-    		report_failed(failed_cmd,ret);
+    		report_ret_failed(failed_cmd,ret);
     		return;
     	}
     	utils::sem_lock l(request_resolver_mutex());
