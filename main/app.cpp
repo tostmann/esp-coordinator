@@ -205,6 +205,22 @@ esp_err_t app::start_int() {
 
 esp_err_t app::init() {
 	ESP_LOGI(TAG,"init");
+	if (boot_guard::safe_mode()) {
+		// WEDGE-1 safe mode has to skip everything that touches the stack or
+		// flash-resident state, not only the ZBOSS task start in start_int():
+		// nvs_flash_init(), ZB_INIT(), the pending structured-restore replay
+		// and zboss_start_no_autostart() all run from here, BEFORE the
+		// safe-mode branch in start_int(). A boot that dies in one of them
+		// would die in exactly the same place in safe mode, and
+		// boot_guard::init() arms no boot deadline in safe mode, so the stick
+		// would stay silent until the 10 min self-heal instead of answering
+		// the host. Safe mode needs neither NVS nor the stack: dispatch serves
+		// only GET_MODULE_VERSION and NCP_RESET (zb_ncp::on_rx_data), and the
+		// erase an NCP_RESET requests runs at the next boot from
+		// handle_pending_erase() in main.cpp.
+		ESP_LOGE(TAG, "boot guard SAFE MODE: NVS and ZBOSS init skipped");
+		return instance().init_int();
+	}
 	auto res = nvs_flash_init();
 	if (res == ESP_ERR_NVS_NO_FREE_PAGES || res == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 		// M2: a host RESTORE_NETWORK can leave nvs in a layout this IDF build

@@ -314,8 +314,8 @@ struct zboss_lock_guard {
 }  // namespace
 
 void zb_ncp::on_rx_data(const void* data,size_t size) {
-	// WEDGE-1 safe mode: ZBOSS was never started (repeated early-boot
-	// failure, see boot_guard.h). Serve only stack-free commands and answer
+	// WEDGE-1 safe mode: ZBOSS was neither initialised nor started (repeated
+	// early-boot failure, see boot_guard.h). Serve only stack-free commands and answer
 	// everything else GENERIC_BLOCKED so hosts fail visibly. Deliberately
 	// NO zboss_lock_guard on this path — the ZBOSS osif lock belongs to a
 	// stack that does not exist this boot.
