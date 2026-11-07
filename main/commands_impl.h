@@ -1145,6 +1145,42 @@ struct zb_ncp::cmd_handle<ZDO_PERMIT_JOINING_REQ> : request_cmd_process< ZDO_PER
         //ESP_LOGI(TAG,"S_ZDO_PERMIT_JOINING_REQ::start_request nwk_addr:%04x time:%d",s_req.dest_addr,int(s_req.permit_duration));
         return zb_zdo_mgmt_permit_joining_req(buf,&Base::req_cb);
     }
+
+    // A ZDO broadcast is never answered (Zigbee spec 2.4.3.3.7; zigbee-herdsman
+    // sends exactly this one with disableResponse=true), so no Mgmt_Permit_Joining_rsp
+    // can ever arrive — yet our request callback still fires. ZBOSS hands it the
+    // REQUEST buffer back, and zdo_send_req() has prepended the ZDP TSN to that
+    // buffer (zb_buf_alloc_left(param,1)), so it reads
+    //     [tsn][permit_duration][tc_significance]
+    // which parsed as zb_zdo_mgmt_permit_joining_resp_t is {tsn, status=duration}.
+    // The TSN therefore matches (the slot resolves) while the "status" is just an
+    // echo of the duration we sent — not a ZDP status at all. That is where the
+    // host-visible nonsense came from: z2m opens with duration=254, so herdsman
+    // logged `PERMIT_JOINING_RESPONSE, status=undefined` (254 is no ZDO status)
+    // and diagnostics chased a phantom error. Nothing had failed.
+    //
+    // Mechanism read off libzboss_stack.zczr (esp-zboss-lib 1.6.4,
+    // zdo_nwk_manage_cli.c / zdo_common.c); bench-proven 6/6 with
+    // test/permit_bcast_status_probe.py — the value tracks the duration byte,
+    // including ZBOSS clamping duration 255 to 254.
+    //
+    // Report success instead: the broadcast itself went out, which is all a
+    // broadcast can tell us. Guarded twice so nothing real gets masked — only for
+    // broadcast destinations (>= 0xFFF8, the same test the stack itself uses to
+    // classify the address) and only when the byte really is that echo, so a
+    // future stack that delivers a genuine status still reaches the host verbatim.
+    static bool response_body_is_synthetic(const request_t& req, uint8_t& status) {
+        if (req.arg.dest_addr < 0xFFF8) {
+            return false;               // unicast, incl. self 0x0000: real response
+        }
+        const uint8_t echo = (req.arg.permit_duration == 0xFF) ? 0xFE
+                                                              : req.arg.permit_duration;
+        if (status != echo) {
+            return false;               // not the echo — pass it through untouched
+        }
+        status = 0;
+        return true;
+    }
 };
 
  // Send Bind request to a remote device
@@ -1858,6 +1894,40 @@ struct zb_apsde_data_resp_t {
 
 static_assert(sizeof(zb_apsde_data_resp_t) == 0x19);
 
+// APS-SEC-1 (2026-10-13): APS link-key security per frame. zigpy >= 2.3.0 asks for it
+// on KeepAlive (0x0025) and Zigbee Direct Configuration (0x003D) by setting TxOptions
+// bit 0x01; zigbee-herdsman's zboss driver does the same for Zigbee Direct. The plain
+// send path (zb_aps_send_user_payload) has no security parameter, so a secured unicast
+// is built the way that function builds its request and handed to ZBOSS directly.
+//
+// zb_apsde_data_request is the APSDE-DATA.request entry that zb_aps_send_user_payload()
+// and esp_zb_aps_data_request() both schedule; the public esp-zboss-lib 1.6.4 headers
+// do not declare it. Its parameter is the 26-byte request in the buffer tail with the
+// layout of apsde_data_req_t (TxOptions at 0x10); ZBOSS sets the APS security bit for
+// TxOptions 0x01 in aps_data_hdr_fill_datareq and encrypts with the destination's link
+// key in the MAC TX path (zb_mac_check_security -> zb_aps_secure_frame). Verified by
+// disassembly of libzboss_stack.zczr.a and esp_zigbee_aps.c.obj, and on air.
+extern "C" void zb_apsde_data_request(zb_uint8_t param);
+// Declared in zb_scheduler.h, which the public zboss_api.h does not pull in; the
+// plain path and esp_zb_aps_data_request() schedule through this same function.
+extern "C" zb_ret_t zb_schedule_callback(zb_callback_t func, zb_uint8_t param);
+
+// The tx confirm used to be matched to its request by the ZCL TSN read back from the
+// confirm buffer's payload. For an APS-secured frame that byte is not the TSN (bench:
+// 23 of 26 confirms lost, APS-SEC-1), and a TSN is not unique anyway: two requests
+// that share one, or a late confirm after the watchdog freed and re-used the slot,
+// could take each other's confirm. Each send now records which slot, in which
+// allocation, its buffer belongs to (APS-SEC-2), and a confirm is matched only through
+// that record. Only the ZBOSS task reads or writes this table (do_request and the tx
+// callback).
+struct apsde_sent_t {
+    size_t old;      // the slot's allocation counter (request_t::old) at send time
+    uint8_t idx;     // slot index
+    bool valid;
+};
+static_assert(zb_ncp::MAX_PARALLEL_REQUESTS <= 256, "apsde_sent_t::idx is a uint8_t");
+static apsde_sent_t s_apsde_sent[256];
+
 template<>
 struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,APSDE_DATA_REQ_max_arg_t>, cmd_base<cmd_handle<APSDE_DATA_REQ>> {
     static constexpr const char* name = "APSDE_DATA_REQ";
@@ -1905,17 +1975,27 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
             	IEEE_ADDR_PRINT(ind->addr),int(ind->dst_addr_mode),int(data_ptr[1]),int(len),data_ptr);
 
             // DISP-2: claim+free the slot atomically before the blocking
-            // handle_response/report_failed send. data_ptr[1] is the ZCL TSN.
+            // handle_response/report_failed send. APS-SEC-2: only by the slot and
+            // allocation recorded for this buffer. A confirm on a buffer without a
+            // record is dropped: ZBOSS copies of a sent buffer inherit
+            // ZB_BUF_HAS_APS_USER_PAYLOAD (binding-table sends make such copies), so
+            // such a confirm cannot be tied to a request, and matching it by TSN
+            // could answer the wrong one. A request left without its confirm is freed
+            // by the slot watchdog.
             ResolveStrategy::request_t req;
-            if (ResolveStrategy::resolve_take(data_ptr[1], req)) {
-            	ESP_LOGD(TAG,"%s::aps_user_payload_callback %d",Cmd::name,int(data_ptr[1]));
+            const apsde_sent_t sent = s_apsde_sent[param];
+            s_apsde_sent[param].valid = false;
+            if (!sent.valid) {
+            	ESP_LOGW(TAG,"%s: confirm on buffer %d without a send record, dropped",Cmd::name,int(param));
+            } else if (ResolveStrategy::resolve_take_at(sent.idx, sent.old, req)) {
+            	ESP_LOGD(TAG,"%s::aps_user_payload_callback %d",Cmd::name,int(req.tsn));
 	        	if (ind->status == 0) {
 	        		 Cmd::handle_response(req,ind);
 	        	} else {
 	        		report_failed(req.cmd,ind->status);
 	        	}
             } else {
-            	ESP_LOGW(TAG,"%s not found request for response %d",Cmd::name,int(data_ptr[1]));
+            	ESP_LOGW(TAG,"%s: confirm for slot %d after its request was freed or re-used",Cmd::name,int(sent.idx));
             }
 
 
@@ -1932,30 +2012,77 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     	return 0;
     }
 
+    static constexpr uint8_t APSDE_TX_OPT_SECURITY = 0x01;  // APSDE-DATA.request TxOptions
+    static constexpr uint8_t APSDE_TX_OPT_ACK = 0x04;
+    static constexpr uint8_t APS_USER_PAYLOAD_MAX = 82;     // zb_aps_send_user_payload's limit
+
+    // APS link-key security is per destination device, so only unicast frames get
+    // it; group and broadcast frames keep the plain path (NWK key only).
+    static bool is_unicast(uint8_t addr_mode, const zb_addr_u& dst) {
+        return addr_mode == ZB_APS_ADDR_MODE_64_ENDP_PRESENT ||
+               (addr_mode == ZB_APS_ADDR_MODE_16_ENDP_PRESENT &&
+                !ZB_NWK_IS_ADDRESS_BROADCAST(dst.addr_short));
+    }
+
+    // APS-SEC-1: the request zb_aps_send_user_payload() builds (26-byte request in the
+    // buffer tail, payload, ZB_BUF_HAS_APS_USER_PAYLOAD so the confirm still reaches
+    // aps_user_payload_callback), with TxOptions SECURITY next to the ACK the plain
+    // path always requests. A secured frame carries 9 more bytes (APS auxiliary header
+    // + MIC); ZBOSS rejects a payload that no longer fits and the host gets the error
+    // at once (bench 2026-10-13: 73 B secured go out, 74 B return status 0x57; plain
+    // stays at 82 B).
+    template <typename ArgVar>
+    static zb_ret_t send_aps_secured(uint8_t buf, const zb_addr_u& dst_addr, ArgVar& arg) {
+        if (arg.hdr.dataLength > APS_USER_PAYLOAD_MAX) {
+            return RET_INVALID_PARAMETER_3;
+        }
+        auto* r = static_cast<apsde_data_req_t*>(zb_buf_get_tail(buf, sizeof(apsde_data_req_t)));
+        memset(r, 0, sizeof(apsde_data_req_t));
+        memcpy(zb_buf_initial_alloc(buf, arg.hdr.dataLength), arg.data, arg.hdr.dataLength);
+        memcpy(r->base.addr_data, &dst_addr, sizeof(r->base.addr_data));
+        r->base.profile_id = arg.hdr.base.profile_id;
+        r->base.cluster_id = arg.hdr.base.cluster_id;
+        r->base.dst_endpoint = get_dst_endpoint(arg.hdr.base);
+        r->base.src_endpoint = arg.hdr.base.src_endpoint;
+        r->base.addr_mode = arg.hdr.base.addr_mode;
+        r->base.tx_options = APSDE_TX_OPT_SECURITY | APSDE_TX_OPT_ACK;
+        zb_buf_flags_or(buf, ZB_BUF_HAS_APS_USER_PAYLOAD);
+        // Only queues the request: zb_schedule_callback returns RET_OK or asserts on a
+        // full queue, so from here the buffer is ZBOSS's. The one rejection in this
+        // function is the size check above; do_request frees the buffer for it.
+        return zb_schedule_callback(zb_apsde_data_request, buf);
+    }
+
     template <typename ArgVar>
     static zb_ret_t start_request(uint8_t buf,ArgVar& arg,ResolveStrategy::request_t& req) {
     	zb_addr_u dst_addr;
         memcpy(&dst_addr,arg.hdr.base.addr_data,8);
 
-    	if (arg.hdr.base.tx_options & 2) {
-
-        } else {
-
-        }
         req.tsn = arg.data[1];
-        ESP_LOGD(TAG,"zb_aps_send_user_payload %d -> %d, %d len: %d",int(arg.hdr.base.src_endpoint),
+        ESP_LOGD(TAG,"APSDE send %d -> %d, tsn %d len: %d",int(arg.hdr.base.src_endpoint),
         	int(get_dst_endpoint(arg.hdr.base)),int(req.tsn),int(arg.hdr.dataLength));
-        auto ret = zb_aps_send_user_payload(buf,
-            dst_addr,
-            arg.hdr.base.profile_id,
-            arg.hdr.base.cluster_id,
-            get_dst_endpoint(arg.hdr.base),
-            arg.hdr.base.src_endpoint,
-            arg.hdr.base.addr_mode,
-            ZB_TRUE, //s->base.tx_options & 1 ? ZB_FALSE : ZB_TRUE,
-            arg.data,
-            arg.hdr.dataLength);
-
+        zb_ret_t ret;
+        if ((arg.hdr.base.tx_options & APSDE_TX_OPT_SECURITY) &&
+            is_unicast(arg.hdr.base.addr_mode, dst_addr)) {
+            ret = send_aps_secured(buf, dst_addr, arg);
+        } else {
+            ret = zb_aps_send_user_payload(buf,
+                dst_addr,
+                arg.hdr.base.profile_id,
+                arg.hdr.base.cluster_id,
+                get_dst_endpoint(arg.hdr.base),
+                arg.hdr.base.src_endpoint,
+                arg.hdr.base.addr_mode,
+                ZB_TRUE,   // APS ACK always; the host's TxOptions are not used here
+                arg.data,
+                arg.hdr.dataLength);
+        }
+        if (ret == RET_OK) {
+            // APS-SEC-2: the confirm is deferred (never synchronous inside the send,
+            // see DISP-2 in do_request), so recording after the call races nothing.
+            // The slot is S_ALLOCATION here, so `old` cannot change under us.
+            s_apsde_sent[buf] = { req.old, uint8_t(ResolveStrategy::get_req_idx(&req)), true };
+        }
         return ret;
     }
     static void do_request(uint8_t buf,uint16_t req_arg) {
@@ -1982,7 +2109,12 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     		ret = start_request(buf,arg,req);
     	}
     	if (ret != 0) {
-    		ESP_LOGE(TAG,"failed zb_aps_send_user_payload %02x",int(ret));
+    		ESP_LOGE(TAG,"APSDE send rejected %d",int(ret));
+    		// Both send paths reject before ZBOSS takes the buffer
+    		// (zb_aps_send_user_payload checks its arguments and the 82-byte
+    		// limit first), so it is still ours. It used to leak here, one
+    		// buffer per rejected request; the generic helper frees too.
+    		zb_buf_free(buf);
     		zb_ncp::cmd_t failed_cmd;
     		{	utils::sem_lock l(request_resolver_mutex());
     			failed_cmd = req.cmd;
@@ -2036,8 +2168,10 @@ struct zb_ncp::cmd_handle<APSDE_DATA_REQ> : request_cmd_resolver<APSDE_DATA_REQ,
     		report_failed(cmd,GENERIC_INVALID_PARAMETER);
     		return;
     	}
-    	// M4: start_request and aps_user_payload_callback both read arg.data[1]
-    	// as the ZCL frame TSN for response matching. Need >= 2 data bytes.
+    	// M4: start_request reads arg.data[1] as the ZCL frame TSN (kept in the
+    	// slot for logs; confirms are matched by slot since APS-SEC-2). Every ZCL
+    	// frame has >= 3 bytes; shorter payloads were always refused here and
+    	// still are.
     	if (arg->dataLength < 2) {
     		ESP_LOGE(TAG,"APSDE_DATA_REQ: dataLength %u too small for ZCL header",
     		         unsigned(arg->dataLength));

@@ -1,0 +1,16 @@
+# Radio image for the ESP Thread Border Router / Zigbee Gateway board (ESP32-S3 + ESP32-H2).
+# The S3 runs the bridge firmware and flashes this image into the H2. Build on top of the
+# common defaults:
+#   idf.py set-target esp32h2
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.zbgw" build
+#
+# NCP link to the S3 on the H2's UART0 pads (GPIO24 TX, GPIO23 RX), 115200 8N1, in
+# parallel to USB-Serial/JTAG. The generic H2 default (TX GPIO22) is silent on this board.
+CONFIG_NCP_UART_TRANSPORT=y
+CONFIG_NCP_UART_TX_GPIO=24
+CONFIG_NCP_UART_RX_GPIO=23
+CONFIG_NCP_UART_BAUD=115200
+# The board's H2 has 2 MB or 4 MB of flash; see sdkconfig.defaults.esp32h2 (repeated here so
+# the overlay also holds on a tree without that file).
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="2MB"

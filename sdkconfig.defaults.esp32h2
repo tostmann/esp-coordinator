@@ -1,0 +1,8 @@
+# ESP32-H2 parts ship with 2 MB or 4 MB of flash (ESP32-H2FH2S vs. ESP32-H2FH4, both seen
+# on the ESP Thread Border Router / Zigbee Gateway board). An image whose header declares
+# more flash than the chip has stops at start-up (assert in init_flash, issue #18), so H2
+# images declare 2 MB. The partition table ends at 0x1FF400 and fits either part; on a 4 MB
+# chip the IDF only notes that the chip is larger than the header.
+# Loaded automatically after sdkconfig.defaults when the target is esp32h2.
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="2MB"

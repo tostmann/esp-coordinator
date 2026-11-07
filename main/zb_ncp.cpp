@@ -25,13 +25,16 @@ static const char* TAG = "NCP";
 #include "commands_impl.h"
 
 // Set to true by apply_pending_restore() when it actually applies a TLV.
-// continue_zboss reads it to force NETWORK_FORMATION (which performs the
-// channel-scan step) instead of the default STEERING — without the explicit
-// formation kick, ZBOSS reports joined=true but the radio sits on channel
-// 255 (uninitialised) because no scan ever ran. See espressif/esp-zigbee-sdk#445
+// continue_zboss reads it to force NETWORK_FORMATION instead of the default
+// STEERING — without the explicit formation kick, ZBOSS reports joined=true
+// but never brings the network up. NOTE: that formation runs on the
+// provisioned NIB and does NOT scan; the operating channel comes from the
+// PIB-cache preset in apply_pending_restore (TAG_CHANNEL), without which
+// the radio stays on the MAC default 11. See espressif/esp-zigbee-sdk#445
 // for the underlying constraint: setters only take effect in factory-reset
 // state, so the restore-applied flag also gates a formation pass that uses
-// our just-set NIB values rather than re-randomising them.
+// our just-set NIB values rather than re-randomising them. The flag also
+// gates the ZB_IB_COUNTERS persist in the formation signal handler.
 static bool s_restore_applied = false;
 
 // Pulls "restore_pend"/"tlv" out of NVS (set by RESTORE_STRUCTURED_BACKUP
@@ -136,7 +139,20 @@ static void apply_pending_restore() {
                     zb_set_channel_mask(mask);
                     zb_set_bdb_primary_channel_set(mask);
                     zb_set_bdb_secondary_channel_set(mask);
-                    ESP_LOGI(TAG, "  Channel = %u (mask 0x%08lx)", ch, (unsigned long)mask);
+                    // The restore-forced FORMATION in continue_zboss runs on an
+                    // already-provisioned NIB and completes without a channel
+                    // scan, so the mask alone does not move the radio: measured
+                    // on the bench (IDF radio driver) and on air (beacon scan
+                    // from a second radio), the restored network sat on the MAC
+                    // default channel 11 while mask and getters said 20. Preset
+                    // the PIB cache the way an NVRAM dataset load would — the
+                    // MAC picks it up at stack start (PR #15, fix 2).
+                    ZB_PIBCACHE_CURRENT_CHANNEL() = ch;
+                    ESP_LOGI(TAG, "  Channel = %u (mask 0x%08lx, PIB preset)", ch, (unsigned long)mask);
+                } else {
+                    // Not applied: the forced formation then lands on the MAC
+                    // default channel 11 (same as an image without TAG_CHANNEL).
+                    ESP_LOGW(TAG, "  Channel %u out of range, ignored — network will come up on 11", ch);
                 }
             } break;
             case backup_structured::TAG_NWK_UPDATE_ID: {
@@ -244,7 +260,16 @@ void zb_ncp::set_channel_mask(uint32_t mask) {
 static bool s_init_flag = false;
 
 void zb_ncp::ncp_zb_task(void* arg) {
-	zb_set_network_coordinator_role(0xffffff);
+	// The argument is a CHANNEL MASK (zboss_api.h: "@param channel_mask"),
+	// not a role/feature word. The inherited 0xffffff meant channels 0-23 —
+	// out of spec at both ends: it claims the non-existent channels 0-10 and
+	// omits the real 24-26. GET_ZIGBEE_CHANNEL_MASK reported that value
+	// verbatim on every boot (factory-new included), and zigpy's Channels
+	// type raises on it while iterating, which breaks automatic zigpy backups
+	// and the ZHA migration flow. Use the SDK's 2.4 GHz set (0x07FFF800).
+	// Note this call also zeroes the BDB channel sets (see the API note), so
+	// continue_zboss re-applies m_channels_mask before commissioning.
+	zb_set_network_coordinator_role(ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
 
     zboss_main_loop();
@@ -293,8 +318,8 @@ struct zboss_lock_guard {
 }  // namespace
 
 void zb_ncp::on_rx_data(const void* data,size_t size) {
-	// WEDGE-1 safe mode: ZBOSS was never started (repeated early-boot
-	// failure, see boot_guard.h). Serve only stack-free commands and answer
+	// WEDGE-1 safe mode: ZBOSS was neither initialised nor started (repeated
+	// early-boot failure, see boot_guard.h). Serve only stack-free commands and answer
 	// everything else GENERIC_BLOCKED so hosts fail visibly. Deliberately
 	// NO zboss_lock_guard on this path — the ZBOSS osif lock belongs to a
 	// stack that does not exist this boot.
@@ -586,11 +611,13 @@ void zb_ncp::continue_zboss(uint8_t arg) {
         }
     } else if (s_restore_applied) {
         // After apply_pending_restore: PAN/ExtPAN/Key/UpdateID are in the NIB
-        // but the radio has not yet selected an operating channel (channel scan
-        // hasn't run). STEERING is a no-op for an "already-joined" coord, so
-        // explicitly trigger FORMATION — the configured channel mask narrows
-        // the scan to the restored channel and the NIB values we just set
-        // survive because we are in factory-reset state per #445.
+        // but the radio has not yet selected an operating channel. STEERING is
+        // a no-op for an "already-joined" coord, so explicitly trigger
+        // FORMATION; the NIB values we just set survive because we are in
+        // factory-reset state per #445. NOTE: this formation does NOT scan —
+        // it completes in ~20 ms on the provisioned NIB and the mask set here
+        // does not select the channel; the operating channel comes from the
+        // PIB-cache preset in apply_pending_restore (TAG_CHANNEL).
         ESP_LOGI(TAG, "continue_zboss: restore applied, forcing NETWORK_FORMATION");
         set_channel_mask(instance().m_channels_mask);
         bdb_start_top_level_commissioning(ZB_BDB_NETWORK_FORMATION);
@@ -787,6 +814,30 @@ extern "C" void zboss_signal_handler(zb_uint8_t param)
             // F1/F2: persist the freshly-formed identity marker + health cache.
             zb_ncp::publish_identity_from_zboss(/*formed=*/true);
             ESP_LOGI(TAG, "Formed network successfully");
+            if (s_restore_applied) {
+                // The NWK outgoing frame counter planted by
+                // esp_zb_nwk_set_frame_counter() is live now (GET_STRUCTURED_
+                // BACKUP reads it back) but did not survive the next reboot:
+                // bench planted 9,000,000 -> 1 after reboot, with this write
+                // 9,000,961. Whether the stack persisted ZB_IB_COUNTERS before
+                // the setter landed or never wrote it at all cannot be told
+                // from the prebuilt archive; the explicit write is what is
+                // measured to work. For a migrated network this is essential —
+                // devices drop coordinator traffic below their stored counter
+                // as replays. We are on the ZBOSS task here and zb_storage was
+                // erased by the RESTORE handler before the reboot (PR #15,
+                // fix 3). s_restore_applied is never cleared, so a later
+                // host-driven NWK_FORMATION in the same uptime writes the
+                // dataset again — harmless.
+                zb_ret_t r = zb_nvram_write_dataset(ZB_IB_COUNTERS);
+                if (r != RET_OK) {
+                    // A failed write silently reproduces the bug this fixes
+                    // (counter back to ~0 after the next reboot).
+                    ESP_LOGE(TAG, "restore: ZB_IB_COUNTERS write failed (%ld)", (long)r);
+                } else {
+                    ESP_LOGI(TAG, "restore: persisted ZB_IB_COUNTERS (frame counter)");
+                }
+            }
         }
 
         break;

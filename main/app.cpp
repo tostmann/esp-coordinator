@@ -301,6 +301,26 @@ esp_err_t app::init() {
 	}
 	if (res != ESP_OK)
 		return res;
+	if (boot_guard::safe_mode()) {
+		// WEDGE-1 safe mode has to skip the ZBOSS initialisation, not only the
+		// ZBOSS task start in start_int(): ZB_INIT(), the pending
+		// structured-restore replay and zboss_start_no_autostart() all run from
+		// zb_ncp::init() here, BEFORE the safe-mode branch in start_int(). A
+		// boot that dies in one of them would die in exactly the same place in
+		// safe mode, and boot_guard::init() arms no boot deadline in safe mode,
+		// so the stick would stay silent until the 10 min self-heal instead of
+		// answering the host. Safe mode needs no stack: dispatch serves only
+		// GET_MODULE_VERSION and NCP_RESET (zb_ncp::on_rx_data), and the erase
+		// an NCP_RESET requests runs at the next boot from
+		// handle_pending_erase() in main.cpp.
+		// wifi-coex differs from master here: NVS stays initialised in safe
+		// mode, because start_int() reads the STA creds from it (netcfg) and
+		// brings WiFi up, so a Mode B stick in safe mode stays reachable over
+		// TCP. A hang inside nvs_flash_init() itself therefore still defeats
+		// safe mode on this branch; master skips NVS as well.
+		ESP_LOGE(TAG, "boot guard SAFE MODE: ZBOSS init skipped");
+		return instance().init_int();
+	}
 	res = zb_ncp::init();
 	if (res != ESP_OK) {
 		return res;

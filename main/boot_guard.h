@@ -16,13 +16,17 @@
 //  - A 30 s boot deadline (esp_timer) converts a silent early hang into a
 //    reboot, so the counter can actually accumulate.
 //  - After 3 consecutive early-boot failures the next boot enters SAFE MODE:
-//    transport/protocol/app come up, the ZBOSS stack is NOT started, and the
-//    command dispatch serves only ZBOSS-free commands (GET_MODULE_VERSION,
-//    NCP_RESET) while answering everything else with GENERIC_BLOCKED — the
-//    stick is host-visible and recoverable (NCP_RESET options=2 = factory
-//    erase via the boot-time pending-erase path) instead of mute forever.
-//    A safe-mode boot resets the counter, so the following reboot attempts
-//    a normal start again.
+//    transport/protocol/app come up, the ZBOSS stack is neither initialised
+//    nor started (app::init skips zb_ncp::init; on wifi-coex NVS stays up for
+//    the netcfg STA creds, so Mode B safe mode keeps WiFi + TCP), and the
+//    command dispatch serves only ZBOSS-free commands
+//    (GET_MODULE_VERSION, NCP_RESET) while answering everything else with
+//    GENERIC_BLOCKED — the stick is host-visible and recoverable
+//    (NCP_RESET options=2 = factory erase via the boot-time pending-erase
+//    path) instead of mute forever.
+//    Safe mode is sticky: the count is kept, so warm resets land back in
+//    safe mode. Exits: a host NCP_RESET, a true power cycle, or the 10 min
+//    self-heal timer (see boot_guard::init in main.cpp).
 namespace boot_guard {
 
 // Evaluate the breadcrumb, bump the failure count, arm the boot deadline.
@@ -30,7 +34,8 @@ namespace boot_guard {
 void init();
 
 // True when this boot runs in safe mode: the ZBOSS stack must not be
-// started and dispatch is restricted (see zb_ncp::on_rx_data).
+// initialised or started (app::init, app::start_int) and dispatch is
+// restricted (see zb_ncp::on_rx_data).
 bool safe_mode();
 
 // Called from zb_ncp::continue_zboss (ZBOSS reached SKIP_STARTUP, NVRAM
