@@ -1,6 +1,6 @@
 # Zigbee2MQTT Integration & Custom Docker Image
 
-The `busware.de ESP32 (ZBOSS)` coordinator firmware is fully compatible with the standard, official [Zigbee2MQTT](https://www.zigbee2mqtt.io) release. **You do not strictly need a custom version of Zigbee2MQTT to use this coordinator.**
+The `busware.de ESP32 (ZBOSS)` coordinator firmware is fully compatible with the standard, official [Zigbee2MQTT](https://www.zigbee2mqtt.io) release. **You do not strictly need a custom version of Zigbee2MQTT to use this coordinator.** This applies to the regular firmware (USB or UART); the experimental WiFi-coex build needs the custom image, see [WiFi-coex build](#wifi-coex-build-experimental-esp32-c6-only).
 
 However, we **highly recommend** using our customized Docker image.
 
@@ -20,7 +20,7 @@ Our custom Docker image automatically patches Zigbee2MQTT on startup to leverage
 
 ## How to Use It
 
-Our GitHub Actions pipeline automatically builds multi-architecture Docker images (`amd64`, `arm64`, `arm/v7`) synchronized with the latest official Zigbee2MQTT releases.
+Our GitHub Actions pipeline builds multi-architecture Docker images (`amd64`, `arm64`, `arm/v7`) from our [fork of Zigbee2MQTT](https://github.com/tostmann/zigbee2mqtt) on every change to its `master` branch. The fork is moved to new official Zigbee2MQTT releases by hand, so it can lag behind the latest one; its `package.json` shows the release it is based on.
 
 Simply replace the official image in your `docker-compose.yml` with ours:
 
@@ -46,8 +46,24 @@ services:
 ### Home Assistant OS Users
 For users running Home Assistant OS with the Add-on store, we plan to provide a custom Add-on repository in the future to allow 1-click installations of this patched version.
 
+## WiFi-coex build (experimental, ESP32-C6 only)
+
+The [WiFi-coex build](https://install.busware.de/zboss/coex/) joins your Wi-Fi and serves the NCP over TCP instead of USB. For this build the custom image is **required**:
+
+* **Timeouts.** One 2.4 GHz radio serves both Wi-Fi and Zigbee. In our tests, round trips between Zigbee2MQTT and the coordinator took up to several seconds on this link. The stock image keeps zigbee-herdsman's fixed ZBOSS timeouts, 2 s for the link-level ACK and 10 s for a command response; when one expires, the Zigbee2MQTT log shows an error line containing `after 2000ms` or `after 10000ms`. The custom image raises both to 30 s ([`scripts/patch_zboss.js`](https://github.com/tostmann/zigbee2mqtt/blob/master/scripts/patch_zboss.js)).
+* **Configuration.** Point Zigbee2MQTT at the coordinator's TCP port, and leave out the `devices:` entry of the compose file above:
+
+  ```yaml
+  serial:
+    # router-assigned IP, or esp-zboss-coord.local if your network resolves mDNS names
+    port: tcp://<device-ip>:6638
+    adapter: zboss
+  ```
+* **Home Assistant OS.** The Zigbee2MQTT add-on ships unpatched Zigbee2MQTT, and there is no add-on with the custom image yet. For the WiFi-coex build, run the custom image on a separate Docker host.
+* **Backups.** The raw NVRAM pull can stall on the TCP link; the custom image then saves a structured backup without the raw NVRAM image. The automatic restore onto a replacement chip only runs from a backup that contains the raw image, so after such a fallback expect to re-pair your devices if the coordinator has to be replaced. For a full raw backup, flash the USB build temporarily and back up over USB. On this build the raw snapshot also contains the Wi-Fi credentials (SSID and password), because they are stored in the `nvs` partition; treat `coordinator_backup.json` accordingly.
+
 ## Do I have to use this?
 
-No. If you prefer to stick to the official `koenkk/zigbee2mqtt` image, everything will still work perfectly. Your devices will pair, route, and function normally. 
+For the regular firmware, no: with the official `koenkk/zigbee2mqtt` image your devices will pair, route, and function normally. The WiFi-coex build needs the custom image (see [above](#wifi-coex-build-experimental-esp32-c6-only)).
 
 The only downside is that you won't have automated, hardware-agnostic snapshots. If your ESP32 breaks while using the standard image, you will either need to re-pair all your devices to the new coordinator or rely on manual CLI flash-dumping tools (like `esptool.py`) to extract and transfer the raw NVRAM before you swap the hardware.
