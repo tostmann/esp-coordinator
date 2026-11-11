@@ -8,13 +8,13 @@ However, we **highly recommend** using our customized Docker image.
 
 The standard `zigbee-herdsman` library (which powers Zigbee2MQTT) currently lacks full native state transfer capabilities for the ZBOSS stack used on ESP32-C6/H2 chips. If your ESP32 hardware breaks and you plug in a new one, a standard Zigbee2MQTT setup cannot restore the old network state (Frame Counters, Trust Center Keys, etc.) to the new chip.
 
-To solve this, we developed a powerful, chunk-based raw NVRAM memory transfer protocol (`0x0099` / `0x009A`) within this ESP32 firmware. 
+To solve this, we developed a powerful, chunk-based raw NVRAM memory transfer protocol (`0x0099` / `0x009A`) within this ESP32 firmware.
 
-Our custom Docker image automatically patches Zigbee2MQTT on startup to leverage this protocol. 
+Our custom Docker image ships a patched `zigbee-herdsman` that uses this protocol. The patches are applied when the image is built ([`scripts/patch_zboss.js`](https://github.com/tostmann/zigbee2mqtt/blob/master/scripts/patch_zboss.js)).
 
 ### Benefits of the Custom Image:
 1. **Automated NVRAM Snapshots:** Zigbee2MQTT will automatically extract the complete 40KB Flash memory (NVS & `zb_storage`) of the ESP32 and save it as a Base64 string inside your standard `coordinator_backup.json`. This acts as a rolling snapshot of your network.
-2. **Seamless Hardware Migration:** If your coordinator dies, simply flash our firmware onto a new ESP32-C6, plug it in, and start Zigbee2MQTT. It will detect the blank chip and automatically stream the latest memory snapshot back onto it. 
+2. **Seamless Hardware Migration:** If your coordinator dies, simply flash our firmware onto a new ESP32-C6, plug it in, and start Zigbee2MQTT. It will detect the blank chip and automatically stream the latest memory snapshot back onto it.
    *(**Note:** Because this is a raw memory image containing exact Frame Counters, the snapshot must be recent. If too many messages were sent after the snapshot was taken, end devices will reject the new coordinator due to Replay-Attack protection.)*
 3. **Custom Branding:** The coordinator will proudly identify itself as `busware.de ESP32 (ZBOSS)` in the Zigbee2MQTT frontend and Home Assistant, rather than just a generic `zboss` adapter.
 
