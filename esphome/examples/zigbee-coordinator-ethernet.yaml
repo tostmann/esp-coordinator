@@ -1,0 +1,96 @@
+# ESP32-C6 + W5500 Ethernet as a Zigbee coordinator (ZBOSS NCP over TCP), with WireGuard.
+# Zigbee2MQTT:  serial: { port: "tcp://<tunnel-ip>:6638", adapter: zboss }
+# ZHA:          socket://<tunnel-ip>:6638, radio type ZBOSS (zigpy-zboss)
+
+esphome:
+  name: zigbee-coordinator-eth
+  friendly_name: Zigbee coordinator (Ethernet)
+
+esp32:
+  variant: esp32c6
+  board: esp32-c6-devkitc-1
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/tostmann/esp-coordinator
+      ref: wifi-coex
+      path: esphome/components
+    components: [zboss_ncp]
+  # From a local checkout instead:
+  # - source:
+  #     type: local
+  #     path: ../components
+
+logger:
+  # USB-Serial/JTAG is free for logs: the NCP only talks TCP (and optionally UART1).
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret api_key
+
+# W5500 on SPI: the 2.4 GHz radio stays Zigbee-only (no WiFi coexistence).
+# Pins: ESP32-C6-DevKitC-1 example wiring, adjust to your board.
+ethernet:
+  type: W5500
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO2
+  cs_pin: GPIO10
+  interrupt_pin: GPIO11
+  reset_pin: GPIO1
+
+time:
+  - platform: sntp
+    id: sntp_time
+
+wireguard:
+  address: !secret wg_address            # e.g. 10.66.0.12
+  netmask: 255.255.255.255
+  private_key: !secret wg_private_key
+  peer_endpoint: !secret wg_peer_endpoint
+  peer_port: 51820
+  peer_public_key: !secret wg_peer_public_key
+  peer_allowed_ips:
+    - !secret wg_peer_allowed_ips          # e.g. 10.66.0.0/24
+  peer_persistent_keepalive: 25s
+
+zboss_ncp:
+  port: 6638
+  # Only the Zigbee2MQTT/ZHA host may open the NCP port (the protocol itself
+  # has no authentication). Here: the WireGuard network.
+  allowed_ips:
+    - 10.66.0.0/24
+  channel:
+    name: Zigbee channel
+  pan_id:
+    name: Zigbee PAN ID
+  extended_pan_id:
+    name: Zigbee extended PAN ID
+  firmware_version:
+    name: NCP firmware
+  host_connected:
+    name: Zigbee host connected
+  network_lost:
+    name: Zigbee network lost
+  safe_mode:
+    name: NCP safe mode
+
+sensor:
+  - platform: wireguard
+    latest_handshake:
+      name: WireGuard latest handshake
+
+binary_sensor:
+  - platform: wireguard
+    status:
+      name: WireGuard status
