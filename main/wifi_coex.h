@@ -24,6 +24,7 @@
 #include <esp_err.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,9 @@ esp_err_t wifi_coex_start_connect(void);
 bool      wifi_coex_is_up(void);          // true once IP_EVENT_STA_GOT_IP fired
 void      wifi_coex_current_ip(char *buf, size_t len);  // "1.2.3.4", or "" when no IP yet
 bool      wifi_coex_current_rssi(int8_t *out);          // true + STA RSSI (dBm) when associated
+// May this peer (IPv4, network byte order) open the NCP TCP port? This build
+// allows every peer; the ESPHome build restricts it to its allowed_ips.
+bool      ncp_tcp_peer_allowed(uint32_t ipv4_be);
 
 #ifdef __cplusplus
 }

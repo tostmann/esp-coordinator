@@ -390,6 +390,7 @@ esp_err_t transport::init_int() {
         return ESP_ERR_NO_MEM;
     }
 
+#if CONFIG_NCP_USB_TRANSPORT
     usb_serial_jtag_driver_config_t usb_serial_jtag_config;
     usb_serial_jtag_config.rx_buffer_size = BUF_SIZE * 2;
     usb_serial_jtag_config.tx_buffer_size = BUF_SIZE * 2;
@@ -401,6 +402,11 @@ esp_err_t transport::init_int() {
         ESP_LOGE(TAG, "Failed to install USB-JTAG driver: %d", err);
         return err;
     }
+#else
+    // USB-Serial/JTAG is not an NCP interface in this build (ESPHome's logger
+    // owns it): no driver install, no USB RX task, write_int skips it.
+    m_serve_usb_ncp = false;
+#endif
 
 #if CONFIG_NCP_UART_TRANSPORT
     // A failed UART bring-up degrades to USB-only instead of failing the
@@ -573,6 +579,11 @@ void transport::tcp_task_int() {
 			vTaskDelay(pdMS_TO_TICKS(100));
 			continue;
 		}
+		if (!ncp_tcp_peer_allowed(cli.sin_addr.s_addr)) {
+			ESP_LOGW(TAG, "NCP client refused (not an allowed host)");
+			::close(cs);
+			continue;
+		}
 		int one = 1;
 		setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 		setsockopt(cs, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
@@ -688,6 +699,11 @@ void transport::tcp_task_int() {
 				struct sockaddr_in c2 = {};
 				socklen_t l2 = sizeof(c2);
 				int a = ::accept(m_listen_sock, reinterpret_cast<struct sockaddr*>(&c2), &l2);
+				if (a >= 0 && !ncp_tcp_peer_allowed(c2.sin_addr.s_addr)) {
+					ESP_LOGW(TAG, "NCP client refused (not an allowed host)");
+					::close(a);
+					a = -1;
+				}
 				if (a >= 0) {
 					int one = 1;
 					setsockopt(a, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));

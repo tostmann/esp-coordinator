@@ -101,6 +101,10 @@ A separate **experimental** build (branch [`wifi-coex`](https://github.com/tostm
 
 The stable USB / UART firmware described in this README (and the main flasher) is unchanged.
 
+### The same firmware as an ESPHome component
+
+[`esphome/`](esphome/README.md) builds this branch's firmware as an [ESPHome](https://esphome.io) external component (`zboss_ncp`). ESPHome then owns the network side: WiFi **or Ethernet** (e.g. a W5500 over SPI, which leaves the radio to Zigbee alone), provisioning, OTA, logging, WireGuard and diagnostic sensors in Home Assistant. The NCP code is the same `main/`, built with `CONFIG_NCP_ESPHOME=y`; the plain `idf.py` build is unchanged. Zigbee2MQTT connects over TCP as above.
+
 
 ## 🌐 Coordinator over the network: the ESP32-S3 + ESP32-H2 gateway board
 

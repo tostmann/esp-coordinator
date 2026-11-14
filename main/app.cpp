@@ -145,7 +145,12 @@ esp_err_t app::start_int() {
     // share the USB-Serial/JTAG wire simultaneously, so no per-byte demux is
     // needed and a coincidental 'IMPROV' substring inside an NCP payload can
     // never be mis-parsed as a provisioning frame.
+#if CONFIG_NCP_ESPHOME
+    // ESPHome owns the network and its provisioning: always Mode B.
+    if (false) {
+#else
     if (!netcfg_has_sta_creds()) {
+#endif
         // MODE A — provisioning. The USB-Serial/JTAG driver is already installed
         // (transport::init in init_int); we do NOT start the transport poll task,
         // do NOT send the boot ACK, and do NOT start the Zigbee stack — so no
@@ -159,7 +164,9 @@ esp_err_t app::start_int() {
         // the stick into safe mode). Stand the guard down: provisioning is a
         // legitimate, unbounded non-ZBOSS state.
         boot_guard::cancel();
+#if !CONFIG_NCP_ESPHOME
         improv_provisioning_start();
+#endif
     } else {
         // MODE B — operational. Bring up WiFi STA (WIFI_PS_NONE first, C6 rule),
         // switch the host link to the TCP NCP server, then start the Zigbee
@@ -238,13 +245,17 @@ esp_err_t app::start_int() {
             // reserved for Improv above (disable_usb_ncp). CaptureBackend
             // persists the new creds + reboots; wifi_coex applies them next
             // boot. The task frees itself once the window closes.
+#if !CONFIG_NCP_ESPHOME
             improv_provisioning_start_reconfig();
+#endif
 
             // On-device info page: after WiFi is up, http://<ip>/ (the Improv
             // "Visit Device" URL) serves the Z2M-over-TCP setup instructions
             // with this device's own address filled in. Waits for got-IP
             // internally; normal Mode B only (not safe mode).
+#if !CONFIG_NCP_ESPHOME
             web_info_start();
+#endif
         }
     }
 

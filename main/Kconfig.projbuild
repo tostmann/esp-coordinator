@@ -10,6 +10,35 @@ menu "Zigbee Network Co-processor"
             were dead and removed in code-review TRNPT-4. NCP_UART_TRANSPORT
             below is an independent, parallel implementation.)
 
+    config NCP_ESPHOME
+        bool "Build as the ESPHome component (esphome/)"
+        default n
+        help
+            Set by esphome/components/zboss_ncp, never in a plain idf.py build.
+            ESPHome then owns the network (WiFi or Ethernet), provisioning,
+            OTA, logging and USB-Serial/JTAG: Improv, the info page and
+            wifi_coex.cpp are not built, the NCP runs from zboss_ncp_main()
+            on a task the component starts, and its host link is the TCP
+            server (optionally UART1).
+
+    config NCP_USB_TRANSPORT
+        bool "NCP host link on USB-Serial/JTAG"
+        default n if NCP_ESPHOME
+        default y
+        help
+            Install the USB-Serial/JTAG driver for the NCP host link. Off under
+            ESPHome, whose logger uses USB-Serial/JTAG.
+
+    config NCP_BACKUP_NVS_PARTITION
+        string "NVS partition carried in network backups"
+        default "zb_nvs" if NCP_ESPHOME
+        default "nvs"
+        help
+            GET_NETWORK_BACKUP / RESTORE_NETWORK carry this NVS partition next
+            to zb_storage, and NCP_RESET factory-erase wipes it. Under ESPHome
+            "nvs" holds ESPHome's own settings, so the NCP gets a partition of
+            its own with the same size (backups stay interchangeable).
+
     config NCP_UART_TRANSPORT
         bool "Additional NCP host link on UART1 (parallel to USB)"
         default y
