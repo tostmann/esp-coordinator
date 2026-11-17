@@ -8,6 +8,7 @@
 
 #include "commands_helpers.h"
 #include "netcfg.h"
+#include <nvs_flash.h>
 #include <esp_mac.h>
 // (soc/usb_serial_jtag_reg.h include dropped 2026-06-05 — it only served the
 // removed USB phy-detach register writes, see the comment in
@@ -2218,7 +2219,7 @@ struct zb_ncp::cmd_handle<ZDO_SET_NODE_DESC_MANUF_CODE> : immediate_cmd_process<
 // reused for every chunk — esp_partition_find_first is not free.
 static inline const esp_partition_t* backup_nvs_partition() {
     static const esp_partition_t* p = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, CONFIG_NCP_BACKUP_NVS_PARTITION);
     return p;
 }
 static inline const esp_partition_t* backup_zb_partition() {
@@ -2333,11 +2334,18 @@ static size_t restore_fail(uint8_t* outdata, ncp_generic_status_t status) {
 // LIVE creds are lifted at session start (nvs still mounted on both paths) and
 // re-applied once the restored flash content is final. Same policy as
 // handle_pending_erase options==2 (creds survive a factory erase).
+//
+// ESPHome build: ESPHome owns the WiFi creds and the default "nvs" (mounted
+// the whole time), so none of this is compiled; the restore touches only
+// CONFIG_NCP_BACKUP_NVS_PARTITION and zb_storage.
+#if !CONFIG_NCP_ESPHOME
 static char s_restore_keep_ssid[NETCFG_SSID_MAXLEN];
 static char s_restore_keep_psk[NETCFG_PSK_MAXLEN];
 static bool s_restore_keep_creds = false;
+#endif
 
 static void restore_reapply_creds() {
+#if !CONFIG_NCP_ESPHOME
     if (!s_restore_keep_creds) return;
     // nvs was deinit'd + rewritten (buffered) or erased + streamed (legacy);
     // mount the restored content fresh. If the image's nvs half doesn't mount,
@@ -2351,6 +2359,7 @@ static void restore_reapply_creds() {
     } else {
         ESP_LOGW(TAG, "RESTORE_NETWORK: restored nvs unmountable, creds not re-applied");
     }
+#endif
 }
 
 // Free a resident snapshot. Public via zb_ncp::release_backup_snapshot():
@@ -2655,9 +2664,11 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
             restore_free_buf();   // drop any buffer left by an abandoned session
             // Lift the live WiFi creds before either path touches nvs (see
             // restore_reapply_creds above — live creds win over the image's).
+#if !CONFIG_NCP_ESPHOME
             s_restore_keep_creds =
                 (netcfg_load(s_restore_keep_ssid, sizeof(s_restore_keep_ssid),
                              s_restore_keep_psk,  sizeof(s_restore_keep_psk)) == ESP_OK);
+#endif
             // F4 buffer-before-commit: accumulate the WHOLE image in RAM and write
             // NOTHING to flash until the final chunk passes the gate — so a
             // rejected (gross-garbage) restore leaves nvs + zb_storage entirely
@@ -2673,8 +2684,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
                 // nvs + zb_storage stay intact on flash for the whole upload.
             } else {
                 ESP_LOGW(TAG, "RESTORE_NETWORK: buffer declined (heap), streaming without gate");
-                extern esp_err_t nvs_flash_deinit(void);
-                nvs_flash_deinit();
+                nvs_flash_deinit_partition(CONFIG_NCP_BACKUP_NVS_PARTITION);
                 // Flash is about to be erased -- latch dirty so EVERY later exit
                 // reboots (review #1), including a failed erase below.
                 s_restore_flash_dirty = true;
@@ -2763,8 +2773,7 @@ struct zb_ncp::cmd_handle<RESTORE_NETWORK> : immediate_cmd_process<RESTORE_NETWO
                 // Gate passed: commit BOTH halves. Erasing irreversibly destroys
                 // the old network, so from here flash is dirty and we ALWAYS reboot
                 // (NVS is deinit'd; app::init re-mounts it next boot).
-                extern esp_err_t nvs_flash_deinit(void);
-                nvs_flash_deinit();
+                nvs_flash_deinit_partition(CONFIG_NCP_BACKUP_NVS_PARTITION);
                 s_restore_flash_dirty = true;
                 esp_err_t e1 = esp_partition_erase_range(nvs_part, 0, nvs_part->size);
                 esp_err_t e2 = esp_partition_erase_range(zb_part,  0, zb_part->size);

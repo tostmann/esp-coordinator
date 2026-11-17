@@ -1,0 +1,3 @@
+.localtest/
+.esphome/
+secrets.yaml

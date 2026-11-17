@@ -314,3 +314,5 @@ extern "C" bool wifi_coex_current_rssi(int8_t *out) {
     *out = ap.rssi;
     return true;
 }
+
+extern "C" bool ncp_tcp_peer_allowed(uint32_t /*ipv4_be*/) { return true; }

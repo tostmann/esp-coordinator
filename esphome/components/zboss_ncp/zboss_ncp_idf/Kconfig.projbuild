@@ -1,0 +1,3 @@
+# The firmware's own options (NCP_*, Zigbee) from main/; the ESPHome
+# component sets NCP_ESPHOME=y and the rest through sdkconfig options.
+rsource "../../../../main/Kconfig.projbuild"
