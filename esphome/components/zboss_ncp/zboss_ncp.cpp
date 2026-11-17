@@ -24,6 +24,8 @@ static const char *const TAG = "zboss_ncp";
 static std::atomic<bool> s_network_up{false};
 // Set by the NCP task if zboss_ncp_main() returns (the NCP failed to start).
 static std::atomic<bool> s_ncp_stopped{false};
+// Set by the NCP (NCP_RESET, restore, boot guard) to reboot the device.
+static std::atomic<bool> s_restart_requested{false};
 static ZbossNcpComponent *s_instance = nullptr;
 
 // Upstream ran app_main() on the 8 KB main task (priority 1); same here. The
@@ -67,6 +69,7 @@ void ZbossNcpComponent::setup() {
   hooks.network_up = &ZbossNcpComponent::network_up_hook_;
   hooks.peer_allowed = &ZbossNcpComponent::peer_allowed_hook_;
   hooks.use_wifi = this->use_wifi_;
+  hooks.restart = []() { s_restart_requested.store(true, std::memory_order_relaxed); };
   ncp_host_set_hooks(&hooks);
 
   ESP_LOGI(TAG, "setup: starting NCP task at %" PRIu32 " ms", millis());
@@ -143,6 +146,12 @@ void ZbossNcpComponent::set_external_antenna(bool external, bool save) {
 }
 
 void ZbossNcpComponent::loop() {
+  if (s_restart_requested.load(std::memory_order_relaxed)) {
+    // From this component's loop, so the debug component stores "zboss_ncp"
+    // as the reboot source.
+    ESP_LOGI(TAG, "NCP requested a reboot");
+    App.safe_reboot();
+  }
   if (s_ncp_stopped.load(std::memory_order_relaxed) && !this->status_has_error()) {
     // Shown as the component's error status (and in Home Assistant), not only
     // in the log. OTA and the API keep working, so it can be fixed remotely.

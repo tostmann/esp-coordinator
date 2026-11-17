@@ -3,6 +3,7 @@
 #include "app.h"
 #include "transport.h"
 #include "boot_guard.h"
+#include "ncp_restart.h"
 #include "version.h"
 #include "esp_heap_caps.h"
 
@@ -168,7 +169,7 @@ static void ncp_reset_deferred_task(void* arg) {
     transport::close_tcp_client();
     vTaskDelay(pdMS_TO_TICKS(50));   // let the FIN out while WiFi is still up
     ESP_LOGI(TAG,"restart");
-    esp_restart();
+    ncp_restart();
 }
 
 // NCP_RESET deliberately sends NO pre-reboot response (changed 2026-06-05,
@@ -2302,7 +2303,7 @@ static void restore_schedule_reboot() {
                     // vanishing socket beats a silently dying one.
                     transport::close_tcp_client();
                     vTaskDelay(pdMS_TO_TICKS(50));
-                    esp_restart(); },
+                    ncp_restart(); },
                 "reboot", 2048, NULL, 5, NULL);
 }
 
@@ -3026,7 +3027,7 @@ struct zb_ncp::cmd_handle<RESTORE_STRUCTURED_BACKUP> : immediate_cmd_process<RES
                             // (same rationale as ncp_reset_deferred_task).
                             transport::close_tcp_client();
                             vTaskDelay(pdMS_TO_TICKS(50));
-                            esp_restart(); },
+                            ncp_restart(); },
                     "rb_struct", 2048, NULL, 5, NULL);
 
         return reply(outdata, GENERIC_OK);

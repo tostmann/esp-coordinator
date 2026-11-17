@@ -11,6 +11,9 @@
 #include "sdkconfig.h"
 
 #include <esp_log.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <string.h>
 #if CONFIG_ESP_COEX_SW_COEXIST_ENABLE
 #include <esp_coexist.h>
@@ -62,6 +65,22 @@ extern "C" bool wifi_coex_is_up(void) {
 
 extern "C" bool ncp_tcp_peer_allowed(uint32_t ipv4_be) {
     return s_hooks.peer_allowed ? s_hooks.peer_allowed(ipv4_be) : true;
+}
+
+// The firmware's reboots (NCP_RESET, restores, boot guard) come here instead
+// of esp_restart() (main/ncp_restart.h): ESPHome reboots from its loop, so its
+// shutdown hooks run and the debug component reports the NCP as the source.
+static constexpr uint32_t RESTART_FALLBACK_MS = 5000;
+
+extern "C" [[noreturn]] void ncp_host_restart(void) {
+    if (s_hooks.restart) {
+        ESP_LOGI(TAG, "reboot requested from ESPHome");
+        s_hooks.restart();
+        vTaskDelay(pdMS_TO_TICKS(RESTART_FALLBACK_MS));
+        ESP_LOGW(TAG, "ESPHome did not reboot within %u ms, restarting",
+                 (unsigned)RESTART_FALLBACK_MS);
+    }
+    esp_restart();
 }
 
 extern "C" void ncp_get_status(ncp_status_t* out) {

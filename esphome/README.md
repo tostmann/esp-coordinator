@@ -108,6 +108,17 @@ device/router, esp-zigbee-lib 2.x) and `openthread`.
 - The NCP protocol has no authentication: use `allowed_ips` and/or reach the
   port only through a WireGuard tunnel.
 - `NCP_RESET` and a network restore reboot the whole device, as on the stick.
+  The reboot goes through ESPHome (`App.safe_reboot()`), so the `debug`
+  component reports "Reboot request from zboss_ncp".
+- ESPHome builds the ESP-IDF logs at ERROR, so the firmware's warnings (a
+  refused host, the restore's heap fallback) do not show. To see them:
+
+  ```yaml
+  esp32:
+    framework:
+      type: esp-idf
+      log_level: WARN
+  ```
 - Without Home Assistant connected, ESPHome reboots the device every 15 minutes
   (`api: reboot_timeout`). The examples set it to `0s`: a coordinator that is
   not in Home Assistant must keep running.

@@ -2,12 +2,16 @@
 """Raw network backup / restore of a ZBOSS NCP over TCP.
 
 usage: ncp_backup.py <host> backup <file> [port]
-       ncp_backup.py <host> restore <file> [port]
+       ncp_backup.py <host> restore <file> [port] [--yes]
 
 backup:  GET_NETWORK_BACKUP (0x0099) in chunks; writes the 40 KB raw image
          (NVS half + zb_storage), as html/zboss_backup.js does.
 restore: RESTORE_NETWORK (0x009A) in 128-byte chunks (offset, total, data);
          the NCP checks the image and reboots. Same chip = same IEEE address.
+         Asks for confirmation first (--yes skips it).
+
+backup refuses to overwrite an existing file, so a swapped command harms
+nothing.
 
 Disconnect Zigbee2MQTT/ZHA first: the NCP serves one host at a time.
 Framing from ncp_probe.py.
@@ -104,14 +108,21 @@ def backup(ncp, path):
         parts.append(data[8:8 + length])
         offset += length
     raw = b"".join(parts)
-    Path(path).write_bytes(raw)
+    with open(path, "xb") as f:      # never overwrite, also not a file made meanwhile
+        f.write(raw)
     print(f"backup: {len(raw)} bytes in {time.time() - t0:.1f} s -> {path}")
 
 
-def restore(ncp, path):
+def read_image(path):
+    if not Path(path).is_file():
+        sys.exit(f"{path}: no such file")
     raw = Path(path).read_bytes()
     if len(raw) != EXPECTED_RAW_SIZE:
         sys.exit(f"{path}: {len(raw)} bytes, expected {EXPECTED_RAW_SIZE}")
+    return raw
+
+
+def restore(ncp, path, raw):
     t0 = time.time()
     for offset in range(0, len(raw), RESTORE_CHUNK):
         chunk = raw[offset:offset + RESTORE_CHUNK]
@@ -122,12 +133,24 @@ def restore(ncp, path):
 
 
 def main():
-    if len(sys.argv) < 4 or sys.argv[2] not in ("backup", "restore"):
+    argv = sys.argv[1:]
+    yes = "--yes" in argv
+    argv = [a for a in argv if a != "--yes"]
+    if len(argv) not in (3, 4) or argv[1] not in ("backup", "restore"):
         sys.exit(__doc__)
-    host, action, path = sys.argv[1:4]
-    port = int(sys.argv[4]) if len(sys.argv) > 4 else 6638
-    ncp = Ncp(host, port)
-    (backup if action == "backup" else restore)(ncp, path)
+    host, action, path = argv[:3]
+    port = int(argv[3]) if len(argv) > 3 else 6638
+    if action == "backup":
+        if Path(path).exists():
+            sys.exit(f"{path} exists; choose another file name (backup never overwrites)")
+        backup(Ncp(host, port), path)
+        return
+    raw = read_image(path)
+    if not yes:
+        answer = input(f"Replace the Zigbee network on {host}:{port} with {path}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            sys.exit("restore cancelled")
+    restore(Ncp(host, port), path, raw)
 
 
 if __name__ == "__main__":
