@@ -118,6 +118,12 @@ multi-attribute reads, ZDO request-slot lifecycle hardening, 200-node
 
 ### [andryblack#2](https://github.com/andryblack/esp-coordinator/issues/2) — Home Assistant ZHA / zigpy-zboss compatibility
 
+> **Update 2026-11:** the ZHA route below is currently
+> broken on Home Assistant 2026.7 and newer: installing
+> `zha-zboss-esp` downgrades zigpy and breaks ZHA. Read
+> [Home Assistant ZHA (experimental)](README.md#home-assistant-zha-experimental)
+> in the README before installing anything.
+
 This asked whether the firmware can be driven from Home Assistant's **ZHA**
 integration (through the `zigpy-zboss` radio library) instead of only
 Zigbee2MQTT. As of mid-2026 there is a working path, though it is younger and
