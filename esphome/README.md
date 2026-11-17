@@ -92,6 +92,12 @@ about them, so do not use them elsewhere then. With `uart:` the firmware takes
 UART1 itself; ESPHome's own `uart:` buses can then only use UART0 (the
 component refuses a configuration that would hand out UART1 twice).
 
+Without a network: with `uart:` the device may run without `wifi:` and
+`ethernet:` (and so without `api:` and `ota:`), as a coordinator behind a
+serial-to-TCP bridge or on a host's serial port. The radio is then Zigbee's
+alone; updates go over USB. The TCP port stays closed. Without `uart:` a
+network is required.
+
 Partitions are added through ESPHome: `zb_storage` (16 KB), `zb_fct` (4 KB),
 `zb_nvs` (24 KB). The component conflicts with ESPHome's own `zigbee` (end
 device/router, esp-zigbee-lib 2.x) and `openthread`.
@@ -160,4 +166,7 @@ ESPHome 2026.10.2 (ESP-IDF 5.5.6), Zigbee2MQTT 2.14.3 (`adapter: zboss`):
   restore about 100 s, then the reboot; same network, the NVS half
   identical, zb_storage only gained records ZBOSS appends after a boot.
 
-Not yet tested on hardware: UART.
+- UART (`uart:` on GPIO22/GPIO23, 115200 baud) through a USB-serial adapter,
+  with WiFi and without any network: Zigbee2MQTT 2.14.3 formed a network over
+  the UART and resumed it after a restart; `NCP_RESET` over the UART reboots
+  through ESPHome and the boot frame arrives on the UART again.

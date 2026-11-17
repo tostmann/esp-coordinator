@@ -3,7 +3,9 @@
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#ifdef USE_NETWORK
 #include "esphome/components/network/util.h"
+#endif
 
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
@@ -41,6 +43,16 @@ static constexpr uint32_t ANTENNA_FALLBACK_MS = 120000;
 static constexpr gpio_num_t ANT_ENABLE_PIN = GPIO_NUM_3;
 static constexpr gpio_num_t ANT_SELECT_PIN = GPIO_NUM_14;
 
+// Without WiFi/Ethernet (NCP over UART only) there is no network: the NCP's
+// TCP server then never starts listening.
+static bool network_connected_() {
+#ifdef USE_NETWORK
+  return network::is_connected();
+#else
+  return false;
+#endif
+}
+
 bool ZbossNcpComponent::network_up_hook_() { return s_network_up.load(std::memory_order_relaxed); }
 
 bool ZbossNcpComponent::peer_allowed_hook_(uint32_t ipv4_be) {
@@ -63,7 +75,7 @@ void ZbossNcpComponent::task_(void * /*arg*/) {
 
 void ZbossNcpComponent::setup() {
   s_instance = this;
-  s_network_up.store(network::is_connected(), std::memory_order_relaxed);
+  s_network_up.store(network_connected_(), std::memory_order_relaxed);
 
   ncp_host_hooks_t hooks{};
   hooks.network_up = &ZbossNcpComponent::network_up_hook_;
@@ -157,7 +169,7 @@ void ZbossNcpComponent::loop() {
     // in the log. OTA and the API keep working, so it can be fixed remotely.
     this->status_set_error(LOG_STR("NCP stopped, see the log"));
   }
-  const bool up = network::is_connected();
+  const bool up = network_connected_();
   s_network_up.store(up, std::memory_order_relaxed);
   if (up && this->use_wifi_ && !this->coex_reapplied_) {
     ncp_host_reapply_coex();
