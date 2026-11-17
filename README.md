@@ -147,26 +147,19 @@ The relevant host-side patches (`RESTORE_NETWORK` adapter integration plus the `
 
 ## Home Assistant ZHA (experimental)
 
-If you would rather drive the coordinator from Home Assistant's native ZHA
-integration (i.e. avoid running Z2M at all), the
-[`tostmann/zha-zboss-esp`](https://github.com/tostmann/zha-zboss-esp)
-custom-component is the path. It is HACS-installable, bundles
-`zigpy-zboss` as a Python requirement, runtime-patches the known library
-compat gaps against current zigpy / serialx, and extends ZHA's
-`RadioType` enum so **ZBOSS** appears as a selectable radio type in the
-add-integration flow.
+> **⚠ Broken on Home Assistant 2026.7 and newer — do not install
+> `zha-zboss-esp` there.** The integration requires `zigpy-zboss`, whose
+> current release (2.0.5) declares `zigpy<2`, while Home Assistant ships
+> zigpy 2.x since 2026.7. Installing it downgrades zigpy and breaks ZHA for
+> every radio type, not just ZBOSS. The fix belongs upstream
+> ([kardia-as/zigpy-zboss#94](https://github.com/kardia-as/zigpy-zboss/issues/94));
+> the integration's README describes how to recover an affected installation.
+> Use Zigbee2MQTT until then.
 
-**Status as of v1.3.x**: the picture has improved substantially. The
-`zigpy-zboss` maintainer is actively modernizing the library
-([kardia-as/zigpy-zboss#73](https://github.com/kardia-as/zigpy-zboss/pull/73)
-brings zigpy ≥ 0.92 / serialx support), and we have hardware-validated that
-branch against this firmware end-to-end: `ControllerApplication.new(auto_form=True)`
-on a factory-blank coordinator and restart-on-formed-network both succeed —
-over USB and over the new UART transport. The v1.3.x firmware fixes that
-made this work (full-spec `NWK_FORMATION` response, the NCP_RESET
-freeze/semantics fixes) are in this release. **For production use, the Z2M
-path above remains the recommended option** until the upstream library
-release lands, after which `tostmann/zha-zboss-esp` will be re-pinned.
+ZHA itself has no ZBOSS radio type. The HACS-installable custom component
+[`tostmann/zha-zboss-esp`](https://github.com/tostmann/zha-zboss-esp) adds one:
+it bundles `zigpy-zboss` as a Python requirement and registers **ZBOSS** as a
+selectable radio type in ZHA's add-integration flow.
 
 ## Configuration Example (zigbee2mqtt)
 
