@@ -4,6 +4,7 @@
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "app.h"
+#include "ncp_restart.h"
 #include "netcfg.h"
 #include "coordid.h"
 #include "boot_guard.h"
@@ -123,7 +124,7 @@ static void deadline_cb(void*)
     // hang class. Reboot so the failure count can accumulate; after
     // BOOT_FAIL_LIMIT of these the next boot enters safe mode.
     ESP_LOGE("BOOT", "boot guard: ZBOSS init deadline expired, restarting");
-    esp_restart();
+    ncp_restart();
 }
 
 void init()
@@ -146,7 +147,7 @@ void init()
         s_safe_mode = true;
         ESP_LOGE("BOOT", "boot guard: entering SAFE MODE (no ZBOSS)");
         const esp_timer_create_args_t heal_args = {
-            .callback = [](void*) { boot_guard::clear(); esp_restart(); },
+            .callback = [](void*) { boot_guard::clear(); ncp_restart(); },
             .arg = nullptr,
             .dispatch_method = ESP_TIMER_TASK,
             .name = "bootheal",

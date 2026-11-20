@@ -1,5 +1,6 @@
 #include "app.h"
 #include "boot_guard.h"
+#include "ncp_restart.h"
 #include "transport.h"
 #include "protocol.h"
 #include "zb_ncp.h"
@@ -107,7 +108,7 @@ esp_err_t app::process_event(const ctx_t& ctx) {
                 process_event(pending);
             }
             vTaskDelay(pdMS_TO_TICKS(100));
-            esp_restart();
+            ncp_restart();
         } break;
         case EVENT_TCP_DISCONNECT:
             // Session-scoped resource cleanup, executed on the app task (the

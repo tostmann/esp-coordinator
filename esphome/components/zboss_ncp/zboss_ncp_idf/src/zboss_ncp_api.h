@@ -16,6 +16,11 @@ typedef struct {
     bool (*peer_allowed)(uint32_t ipv4_be);
     // ESPHome runs WiFi: enable WiFi/802.15.4 software coexistence.
     bool use_wifi;
+    // Reboot through the host's own path (shutdown hooks, reboot source).
+    // Called from an NCP task or esp_timer callback: only set a flag. If the
+    // device has not rebooted 5 s later, the NCP calls esp_restart() itself.
+    // NULL = esp_restart() straight away.
+    void (*restart)(void);
 } ncp_host_hooks_t;
 
 // Set before zboss_ncp_main(); the struct is copied.
