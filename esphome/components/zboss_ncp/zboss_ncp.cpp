@@ -3,7 +3,9 @@
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#ifdef USE_NETWORK
 #include "esphome/components/network/util.h"
+#endif
 
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
@@ -24,6 +26,8 @@ static const char *const TAG = "zboss_ncp";
 static std::atomic<bool> s_network_up{false};
 // Set by the NCP task if zboss_ncp_main() returns (the NCP failed to start).
 static std::atomic<bool> s_ncp_stopped{false};
+// Set by the NCP (NCP_RESET, restore, boot guard) to reboot the device.
+static std::atomic<bool> s_restart_requested{false};
 static ZbossNcpComponent *s_instance = nullptr;
 
 // Upstream ran app_main() on the 8 KB main task (priority 1); same here. The
@@ -38,6 +42,16 @@ static constexpr uint32_t ANTENNA_FALLBACK_MS = 120000;
 // control, GPIO14 selects the antenna (high = U.FL). See main/main.cpp.
 static constexpr gpio_num_t ANT_ENABLE_PIN = GPIO_NUM_3;
 static constexpr gpio_num_t ANT_SELECT_PIN = GPIO_NUM_14;
+
+// Without WiFi/Ethernet (NCP over UART only) there is no network: the NCP's
+// TCP server then never starts listening.
+static bool network_connected_() {
+#ifdef USE_NETWORK
+  return network::is_connected();
+#else
+  return false;
+#endif
+}
 
 bool ZbossNcpComponent::network_up_hook_() { return s_network_up.load(std::memory_order_relaxed); }
 
@@ -61,12 +75,13 @@ void ZbossNcpComponent::task_(void * /*arg*/) {
 
 void ZbossNcpComponent::setup() {
   s_instance = this;
-  s_network_up.store(network::is_connected(), std::memory_order_relaxed);
+  s_network_up.store(network_connected_(), std::memory_order_relaxed);
 
   ncp_host_hooks_t hooks{};
   hooks.network_up = &ZbossNcpComponent::network_up_hook_;
   hooks.peer_allowed = &ZbossNcpComponent::peer_allowed_hook_;
   hooks.use_wifi = this->use_wifi_;
+  hooks.restart = []() { s_restart_requested.store(true, std::memory_order_relaxed); };
   ncp_host_set_hooks(&hooks);
 
   ESP_LOGI(TAG, "setup: starting NCP task at %" PRIu32 " ms", millis());
@@ -143,12 +158,18 @@ void ZbossNcpComponent::set_external_antenna(bool external, bool save) {
 }
 
 void ZbossNcpComponent::loop() {
+  if (s_restart_requested.load(std::memory_order_relaxed)) {
+    // From this component's loop, so the debug component stores "zboss_ncp"
+    // as the reboot source.
+    ESP_LOGI(TAG, "NCP requested a reboot");
+    App.safe_reboot();
+  }
   if (s_ncp_stopped.load(std::memory_order_relaxed) && !this->status_has_error()) {
     // Shown as the component's error status (and in Home Assistant), not only
     // in the log. OTA and the API keep working, so it can be fixed remotely.
     this->status_set_error(LOG_STR("NCP stopped, see the log"));
   }
-  const bool up = network::is_connected();
+  const bool up = network_connected_();
   s_network_up.store(up, std::memory_order_relaxed);
   if (up && this->use_wifi_ && !this->coex_reapplied_) {
     ncp_host_reapply_coex();

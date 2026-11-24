@@ -63,6 +63,10 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
     // esp_driver_usb_serial_jtag/src/usb_serial_jtag.c.)
     const uint8_t active = m_active.load(std::memory_order_relaxed);
     bool delivered = false;
+    // No host to deliver to: boot frames before any host has spoken, or the
+    // TCP client has gone. Dropping the frame is expected then, not an error
+    // (it used to log "Process event fail" for every such frame).
+    bool no_host = (active == IFACE_NONE);
 
     // TCP client (wifi-coex Mode B). Only the ACTIVE-TCP path writes the
     // socket — IFACE_NONE deliberately does NOT offer frames to a connected
@@ -122,6 +126,7 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
         }
         // fd < 0: client vanished mid-session — the frame is dropped; the
         // host re-requests after reconnecting.
+        if (fd < 0) no_host = true;
     }
 
     if (m_serve_usb_ncp && (active == IFACE_USB || active == IFACE_NONE)) {
@@ -160,7 +165,7 @@ esp_err_t transport::write_int(const void *buffer, size_t size)
     }
 #endif
 
-    return delivered ? ESP_OK : ESP_ERR_INVALID_SIZE;
+    return (delivered || no_host) ? ESP_OK : ESP_ERR_INVALID_SIZE;
 }
 
 void transport::rx_pump(const uint8_t* data, int readed) {

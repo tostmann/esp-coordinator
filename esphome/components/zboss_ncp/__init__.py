@@ -39,7 +39,9 @@ from esphome.const import (
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
 
-DEPENDENCIES = ["network"]
+# No hard dependency on "network": with 'uart:' the host link is the UART and
+# the device may run without WiFi or Ethernet (_final_validate checks it).
+DEPENDENCIES = []
 AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor", "select"]
 CONFLICTS_WITH = ["zigbee", "openthread"]
 
@@ -170,6 +172,11 @@ def _check_uart1(config, full):
 def _final_validate(config):
     full = fv.full_config.get()
     _check_uart1(config, full)
+    if "network" not in full and CONF_UART not in config:
+        raise cv.Invalid(
+            "zboss_ncp: no host link. Add a network (wifi: or ethernet:) for the "
+            "TCP port, or 'uart:' to run the NCP over UART1 without a network."
+        )
     if CONF_WIFI in full:
         if CONF_AP in full[CONF_WIFI]:
             raise cv.Invalid(
