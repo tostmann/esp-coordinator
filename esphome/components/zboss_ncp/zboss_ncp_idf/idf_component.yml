@@ -1,6 +1,6 @@
 ## Pinned to the libraries the wifi-coex release images are built with
-## (main/idf_component.yml allows ^1.6.0): ESPHome users build from source,
-## so the same versions for everyone.
+## (the same pins as main/idf_component.yml): ESPHome users build from
+## source, so the same versions for everyone.
 dependencies:
   espressif/esp-zigbee-lib: "==1.6.8"
   espressif/esp-zboss-lib: "==1.6.4"
