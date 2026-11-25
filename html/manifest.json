@@ -1,6 +1,6 @@
 {
   "name": "ESP-Coordinator",
-  "version": "v1.5.80",
+  "version": "v1.5.82",
   "funding_url": "https://paypal.me/busware",
   "builds": [
     {
